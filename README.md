@@ -76,37 +76,6 @@ python wsgi.py
 
 The API will be available at `http://localhost:5000`
 
-## Project Structure
-
-```
-backend/
-├── app/
-│   ├── __init__.py           # Application factory
-│   ├── api/                  # API endpoints
-│   │   ├── __init__.py
-│   │   └── v1/
-│   │       ├── auth.py       # Authentication endpoints
-│   │       ├── users.py      # User endpoints
-│   │       └── organizations.py
-│   ├── exceptions/           # Custom exceptions
-│   ├── middleware/           # Middleware components
-│   ├── models/               # Database models
-│   ├── schemas/              # Marshmallow schemas
-│   ├── services/             # Business logic layer
-│   └── utils/                # Utilities
-├── config/                   # Configuration files
-├── docs/                     # Documentation
-├── migrations/               # Database migrations
-├── scripts/                  # Utility scripts
-├── tests/                    # Test suite
-│   ├── integration/
-│   └── unit/
-├── requirements/             # Dependencies
-├── .env.example             # Environment variables template
-├── pytest.ini               # Pytest configuration
-├── pyproject.toml           # Project metadata
-└── wsgi.py                  # WSGI entry point
-```
 
 ## API Endpoints
 
@@ -170,24 +139,6 @@ Error responses:
 }
 ```
 
-## Testing
-
-Run all tests:
-```bash
-pytest
-```
-
-Run with coverage:
-```bash
-pytest --cov=app --cov-report=html
-```
-
-Run specific test types:
-```bash
-pytest -m unit           # Unit tests only
-pytest -m integration    # Integration tests only
-```
-
 ## Database Migrations
 
 Create a new migration:
@@ -205,21 +156,6 @@ Rollback:
 flask db downgrade
 ```
 
-## Development
-
-### Code Quality
-
-Run linter:
-```bash
-flake8 app/ tests/
-```
-
-Format code:
-```bash
-black app/ tests/
-isort app/ tests/
-```
-
 ### Environment Configuration
 
 - **Development**: `FLASK_ENV=development`
@@ -235,24 +171,6 @@ pip install -r requirements/production.txt
 gunicorn -w 4 -b 0.0.0.0:8000 wsgi:app
 ```
 
-### Docker (example)
-
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-COPY requirements/production.txt .
-RUN pip install -r production.txt
-COPY . .
-CMD ["gunicorn", "-w", "4", "-b", "0.0.0.0:8000", "wsgi:app"]
-```
-
-### Environment Variables
-
-Required production environment variables:
-- `SECRET_KEY` - Flask secret key (must be random)
-- `DATABASE_URL` - PostgreSQL connection string
-- `REDIS_URL` - Redis connection string
-- `FLASK_ENV=production`
 
 ## Security Considerations
 
@@ -263,25 +181,6 @@ Required production environment variables:
 - SQL injection protection via SQLAlchemy ORM
 - Session management with secure cookies
 - Request ID tracking for audit trails
-
-## License
-
-MIT
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Run test suite
-6. Submit a pull request
-
-## Support
-
-For issues and questions:
-- GitHub Issues: [repository-url]/issues
-- Documentation: See `docs/` directory
 
 
 # Boostrap db

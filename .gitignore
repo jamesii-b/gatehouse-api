@@ -134,6 +134,5 @@ dmypy.json
 Thumbs.db
 
 # Project specific
-migrations/versions/*.py
-!migrations/versions/.gitkeep
+
 *.db

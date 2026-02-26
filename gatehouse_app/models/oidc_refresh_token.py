@@ -24,9 +24,9 @@ class OIDCRefreshToken(BaseModel):
     # Token (hashed for security)
     token_hash = db.Column(db.String(255), nullable=False, unique=True, index=True)
 
-    # Associated access token ID
+    # Associated access token ID (stores JWT JTI string — no FK to sessions)
     access_token_id = db.Column(
-        db.String(36), db.ForeignKey("sessions.id"), nullable=True, index=True
+        db.String(255), nullable=True, index=True
     )
 
     # Token scope
@@ -50,7 +50,6 @@ class OIDCRefreshToken(BaseModel):
     # Relationships
     client = db.relationship("OIDCClient", back_populates="refresh_tokens")
     user = db.relationship("User", back_populates="oidc_refresh_tokens")
-    access_token = db.relationship("Session", back_populates="oidc_refresh_token")
 
     def __repr__(self):
         """String representation of OIDCRefreshToken."""
@@ -154,10 +153,4 @@ User.oidc_refresh_tokens = db.relationship(
 from gatehouse_app.models.oidc_client import OIDCClient
 OIDCClient.refresh_tokens = db.relationship(
     "OIDCRefreshToken", back_populates="client", cascade="all, delete-orphan"
-)
-
-# Add relationship back to Session model
-from gatehouse_app.models.session import Session
-Session.oidc_refresh_token = db.relationship(
-    "OIDCRefreshToken", back_populates="access_token", uselist=False
 )

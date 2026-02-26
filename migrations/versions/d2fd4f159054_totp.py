@@ -99,7 +99,7 @@ def upgrade():
     sa.ForeignKeyConstraint(['organization_id'], ['organizations.id'], ),
     sa.PrimaryKeyConstraint('id'),
     sa.UniqueConstraint('id'),
-    sa.UniqueConstraint('organization_id', 'provider_type', name='uix_org_provider_type')
+    sa.UniqueConstraint('organization_id', 'provider_type', name='uix_org_provider_override_type')
     )
     op.create_index(op.f('ix_organization_provider_overrides_organization_id'), 'organization_provider_overrides', ['organization_id'], unique=False)
     op.create_index(op.f('ix_organization_provider_overrides_provider_type'), 'organization_provider_overrides', ['provider_type'], unique=False)

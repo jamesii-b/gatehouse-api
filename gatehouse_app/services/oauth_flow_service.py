@@ -81,10 +81,11 @@ class OAuthFlowService:
                     400,
                 )
 
-            # Generate PKCE parameters (Google web applications don't use PKCE)
+            # Generate PKCE parameters (Google and Microsoft web applications don't use PKCE
+            # when a client_secret is present — they are confidential clients)
             code_verifier = None
             code_challenge = None
-            if provider_type_str not in ['google']:
+            if provider_type_str not in ['google', 'microsoft']:
                 code_verifier = secrets.token_urlsafe(32)
                 code_challenge = ExternalAuthService._compute_s256_challenge(code_verifier)
 
@@ -92,7 +93,7 @@ class OAuthFlowService:
             logger.info(
                 f"[PKCE DEBUG] Provider type check: provider_type_str='{provider_type_str}', "
                 f"is_google={provider_type_str in ['google']}, "
-                f"will_skip_pkce={provider_type_str in ['google']}"
+                f"will_skip_pkce={provider_type_str in ['google', 'microsoft']}"
             )
 
             # Create OAuth state for login flow
@@ -183,10 +184,11 @@ class OAuthFlowService:
                     400,
                 )
 
-            # Generate PKCE parameters (Google web applications don't use PKCE)
+            # Generate PKCE parameters (Google and Microsoft web applications don't use PKCE
+            # when a client_secret is present — they are confidential clients)
             code_verifier = None
             code_challenge = None
-            if provider_type_str not in ['google']:
+            if provider_type_str not in ['google', 'microsoft']:
                 code_verifier = secrets.token_urlsafe(32)
                 code_challenge = ExternalAuthService._compute_s256_challenge(code_verifier)
 
@@ -194,7 +196,7 @@ class OAuthFlowService:
             logger.info(
                 f"[PKCE DEBUG] Register flow - Provider type check: provider_type_str='{provider_type_str}', "
                 f"is_google={provider_type_str in ['google']}, "
-                f"will_skip_pkce={provider_type_str in ['google']}"
+                f"will_skip_pkce={provider_type_str in ['google', 'microsoft']}"
             )
 
             # Create OAuth state for register flow
@@ -404,77 +406,121 @@ class OAuthFlowService:
             ).first()
 
             if not auth_method:
-                # User doesn't exist - check if email matches existing user
+                # No linked account found — check if email matches an existing user
                 existing_user = User.query.filter_by(
                     email=user_info["email"]
                 ).first()
 
                 if existing_user:
-                    AuditService.log_external_auth_login_failed(
-                        organization_id=state_record.organization_id,
-                        provider_type=provider_type_str,
+                    # Email exists but no OAuth link — auto-link and log in
+                    logger.info(
+                        f"OAuth login: email {user_info['email']} matches existing user "
+                        f"{existing_user.id}, auto-linking {provider_type_str} account"
+                    )
+                    auth_method = AuthenticationMethod(
+                        user_id=existing_user.id,
+                        method_type=provider_type,
                         provider_user_id=user_info["provider_user_id"],
+                        provider_data=ExternalAuthService._encrypt_provider_data(tokens, user_info),
+                        verified=user_info.get("email_verified", False),
+                        is_primary=False,
+                        last_used_at=datetime.utcnow(),
+                    )
+                    auth_method.save()
+                    user = existing_user
+                else:
+                    # Brand-new user — auto-register via OAuth (standard behaviour)
+                    logger.info(
+                        f"OAuth login: no account for {user_info['email']}, "
+                        f"auto-creating user via {provider_type_str}"
+                    )
+                    user = User(
                         email=user_info["email"],
-                        failure_reason="email_exists",
-                        error_message=f"An account with email {user_info['email']} already exists",
+                        full_name=user_info.get("name", ""),
+                        status="active",
+                        email_verified=user_info.get("email_verified", False),
                     )
-                    raise OAuthFlowError(
-                        f"An account with email {user_info['email']} already exists. "
-                        "Please log in with your password and link your account from settings.",
-                        "EMAIL_EXISTS",
-                        400,
-                    )
+                    user.save()
 
-                AuditService.log_external_auth_login_failed(
-                    organization_id=state_record.organization_id,
-                    provider_type=provider_type_str,
-                    provider_user_id=user_info["provider_user_id"],
-                    email=user_info["email"],
-                    failure_reason="account_not_found",
-                    error_message="No Gatehouse account matches this external account",
+                    auth_method = AuthenticationMethod(
+                        user_id=user.id,
+                        method_type=provider_type,
+                        provider_user_id=user_info["provider_user_id"],
+                        provider_data=ExternalAuthService._encrypt_provider_data(tokens, user_info),
+                        verified=user_info.get("email_verified", False),
+                        is_primary=True,
+                        last_used_at=datetime.utcnow(),
+                    )
+                    auth_method.save()
+
+                    AuditService.log_action(
+                        action="user.register",
+                        user_id=user.id,
+                        organization_id=state_record.organization_id,
+                        resource_type="user",
+                        resource_id=user.id,
+                        metadata={
+                            "provider_type": provider_type_str,
+                            "provider_user_id": user_info["provider_user_id"],
+                            "auto_registered": True,
+                        },
+                        description=f"User auto-registered via {provider_type_str} OAuth",
+                        success=True,
+                    )
+            else:
+                # Existing linked account — update provider data
+                auth_method.provider_data = ExternalAuthService._encrypt_provider_data(
+                    tokens, user_info
                 )
-                raise OAuthFlowError(
-                    "No Gatehouse account matches this external account. Please register first.",
-                    "ACCOUNT_NOT_FOUND",
-                    404,
-                )
+                auth_method.last_used_at = datetime.utcnow()
+                auth_method.save()
 
             user = auth_method.user
-
-            # Update provider data
-            auth_method.provider_data = ExternalAuthService._encrypt_provider_data(
-                tokens, user_info
-            )
-            auth_method.last_used_at = datetime.utcnow()
-            auth_method.save()
 
             # Get user's organizations
             user_orgs = user.get_organizations()
 
             # Determine target organization
             target_org = None
-            
+
             # Priority 1: Use organization_id from state if provided (org hint)
             if state_record.organization_id:
                 target_org = next(
                     (org for org in user_orgs if org.id == state_record.organization_id),
                     None
                 )
-            
+
             # Priority 2: If user has exactly one organization, use it
             if not target_org and len(user_orgs) == 1:
                 target_org = user_orgs[0]
-            
-            # Priority 3: No organization or multiple organizations - need selection
+
+            # Priority 3: No orgs at all — auto-create a personal org and log in
+            if not target_org and len(user_orgs) == 0:
+                import re
+                import uuid
+                from gatehouse_app.services.organization_service import OrganizationService
+                org_name = f"{user_info.get('name') or user.email.split('@')[0]}'s Workspace"
+                # Build a URL-safe slug and ensure uniqueness with a short suffix
+                base_slug = re.sub(r"[^a-z0-9]+", "-", org_name.lower()).strip("-")[:40]
+                slug = f"{base_slug}-{uuid.uuid4().hex[:6]}"
+                org = OrganizationService.create_organization(
+                    name=org_name,
+                    slug=slug,
+                    owner_user_id=user.id,
+                )
+                target_org = org
+                logger.info(
+                    f"OAuth login: auto-created org '{org.name}' (id={org.id}) "
+                    f"for new user {user.id}"
+                )
+
+            # Priority 4: Multiple orgs — need user to pick one
             if not target_org:
-                # Mark state as used
                 state_record.mark_used()
-                
                 logger.info(
                     f"OAuth login requires org selection for user={user.id}, "
                     f"provider={provider_type_str}, org_count={len(user_orgs)}"
                 )
-                
                 return {
                     "success": True,
                     "flow_type": "login",
@@ -488,7 +534,7 @@ class OAuthFlowService:
                         {
                             "id": org.id,
                             "name": org.name,
-                            "slug": org.slug if hasattr(org, 'slug') else None,
+                            "slug": org.slug if hasattr(org, "slug") else None,
                         }
                         for org in user_orgs
                     ],

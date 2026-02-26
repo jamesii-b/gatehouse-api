@@ -113,3 +113,6 @@ class BaseConfig:
     WEBAUTHN_RP_ID = os.getenv("WEBAUTHN_RP_ID", "localhost")
     WEBAUTHN_RP_NAME = os.getenv("WEBAUTHN_RP_NAME", "Gatehouse")
     WEBAUTHN_ORIGIN = os.getenv("WEBAUTHN_ORIGIN", "https://ui.webauthn.local")
+
+    # Frontend URL (for OAuth callback redirects)
+    FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8080")

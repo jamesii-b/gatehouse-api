@@ -164,9 +164,10 @@ class TOTPService:
             be used again. This ensures each code is single-use.
         """
         remaining_codes = []
+        matched = False
 
         for hashed_code in hashed_codes:
-            if bcrypt.check_password_hash(hashed_code, code):
+            if not matched and bcrypt.check_password_hash(hashed_code, code):
                 # Code found and valid - mark as matched but don't add to remaining codes
                 matched = True
             else:
@@ -176,7 +177,7 @@ class TOTPService:
         if matched:
             return True, remaining_codes
         else:
-            return False, remaining_codes
+            return False, hashed_codes
 
     @staticmethod
     def generate_qr_code_data_uri(provisioning_uri: str) -> str:

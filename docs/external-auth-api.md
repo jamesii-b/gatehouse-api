@@ -714,12 +714,44 @@ Provider tokens are encrypted at rest:
 - Auth URL: `https://login.microsoftonline.com/common/oauth2/v2.0/authorize`
 - Token URL: `https://login.microsoftonline.com/common/oauth2/v2.0/token`
 - UserInfo URL: `https://graph.microsoft.com/oidc/userinfo`
+- JWKS URL: `https://login.microsoftonline.com/common/discovery/v2.0/keys`
 
 **Default Scopes:**
 - `openid` - OpenID Connect
 - `profile` - User profile
 - `email` - Email address
-- `User.Read` - Microsoft Graph access
+- `offline_access` - Required by Microsoft to return a refresh token (unlike Google which uses `access_type=offline`)
+
+
+#### Azure App Registration steps
+
+1. Go to [Azure Portal](https://portal.azure.com) → **App registrations** → **New registration**
+2. Under **"Supported account types"** choose the option that matches your use case (see table above)
+3. Set **Redirect URI** (Web platform) to:
+   `https://<your-api-host>/api/v1/auth/external/microsoft/callback`
+4. Under **Certificates & secrets** → **New client secret** — copy the *Value* (not the Secret ID)
+5. Under **API permissions** → **Add a permission** → **Microsoft Graph** → **Delegated**:
+   add `openid`, `profile`, `email`, `offline_access`
+6. Configure Gatehouse:
+   ```bash
+   # Multi-tenant (work + personal accounts):
+   MICROSOFT_CLIENT_ID=<Application (client) ID> \
+   MICROSOFT_CLIENT_SECRET=<client secret value> \
+   python scripts/configure_oauth_provider.py create microsoft \
+       --redirect-url "https://<your-api-host>/api/v1/auth/external/microsoft/callback"
+
+   # Work/school accounts only (replace with your tenant ID for single-org):
+   MICROSOFT_CLIENT_ID=<Application (client) ID> \
+   MICROSOFT_CLIENT_SECRET=<client secret value> \
+   python scripts/configure_oauth_provider.py create microsoft \
+       --tenant-id organizations \
+       --redirect-url "https://<your-api-host>/api/v1/auth/external/microsoft/callback"
+   ```
+
+**Behaviour notes:**
+- Microsoft is a **confidential client** — PKCE is not used (the client secret authenticates the app).
+- The `email_verified` claim is implicitly `true` for all Azure AD accounts; Gatehouse defaults it to `true` when Microsoft omits it.
+- `prompt=select_account` is sent by default so users can choose between multiple signed-in Microsoft accounts.
 
 ---
 

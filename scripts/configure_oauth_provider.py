@@ -12,6 +12,12 @@ Usage:
         --client-secret "YOUR_CLIENT_SECRET" \\
         --redirect-url "http://localhost:5173/auth/callback"
 
+    # Create a Microsoft provider configuration
+    python scripts/configure_oauth_provider.py create microsoft \\
+        --client-id "YOUR_AZURE_APP_ID" \\
+        --client-secret "YOUR_AZURE_CLIENT_SECRET" \\
+        --redirect-url "http://localhost:5000/api/v1/auth/external/microsoft/callback"
+
     # List all configured providers
     python scripts/configure_oauth_provider.py list
 
@@ -27,6 +33,11 @@ Usage:
     # Use environment variables
     GOOGLE_CLIENT_ID=xxx GOOGLE_CLIENT_SECRET=yyy \\
         python scripts/configure_oauth_provider.py create google
+
+    # Use environment variables (Microsoft)
+    MICROSOFT_CLIENT_ID=xxx MICROSOFT_CLIENT_SECRET=yyy \\
+        python scripts/configure_oauth_provider.py create microsoft
+
 """
 
 import os
@@ -50,6 +61,33 @@ from gatehouse_app import create_app
 from gatehouse_app.services.external_auth_service import ExternalAuthService, ExternalAuthError
 
 
+def _microsoft_defaults() -> dict:
+    """
+    Build Microsoft provider defaults, honouring MICROSOFT_TENANT_ID if set.
+
+    Tenant options:
+      - "common"    : work/school AND personal Microsoft accounts (app must be
+                      registered with "Accounts in any organizational directory
+                      and personal Microsoft accounts" in Azure Portal)
+      - "consumers" : personal Microsoft accounts only (MSA)
+      - "organizations": work/school accounts only (AAD)
+      - "<tenant-id>": single specific Azure AD tenant (most secure for enterprise)
+
+    Set MICROSOFT_TENANT_ID env var or pass --tenant-id to the script.
+    """
+    tenant = os.environ.get("MICROSOFT_TENANT_ID", "common")
+    base = f"https://login.microsoftonline.com/{tenant}"
+    return {
+        "auth_url": f"{base}/oauth2/v2.0/authorize",
+        "token_url": f"{base}/oauth2/v2.0/token",
+        "userinfo_url": "https://graph.microsoft.com/oidc/userinfo",
+        "jwks_url": f"{base}/discovery/v2.0/keys",
+        # offline_access is required by Microsoft to receive a refresh token
+        # (unlike Google which uses access_type=offline as a query param)
+        "scopes": ["openid", "profile", "email", "offline_access"],
+    }
+
+
 # Provider endpoint configurations
 PROVIDER_DEFAULTS = {
     "google": {
@@ -65,13 +103,7 @@ PROVIDER_DEFAULTS = {
         "userinfo_url": "https://api.github.com/user",
         "scopes": ["read:user", "user:email"],
     },
-    "microsoft": {
-        "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
-        "token_url": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-        "userinfo_url": "https://graph.microsoft.com/oidc/userinfo",
-        "jwks_url": "https://login.microsoftonline.com/common/discovery/v2.0/keys",
-        "scopes": ["openid", "profile", "email"],
-    },
+    "microsoft": _microsoft_defaults(),
 }
 
 
@@ -163,6 +195,25 @@ def create_provider(args):
         return 1
     
     defaults = PROVIDER_DEFAULTS[provider_type]
+
+    # For Microsoft, allow --tenant-id / MICROSOFT_TENANT_ID to override URLs at create time
+    if provider_type == "microsoft":
+        tenant_id = getattr(args, "tenant_id", None) or os.environ.get("MICROSOFT_TENANT_ID")
+        if tenant_id and tenant_id != os.environ.get("MICROSOFT_TENANT_ID", "common"):
+            # Recompute URLs with the supplied tenant
+            os.environ["MICROSOFT_TENANT_ID"] = tenant_id
+            defaults = _microsoft_defaults()
+            print_info(f"Using Microsoft tenant: {tenant_id}")
+        elif tenant_id:
+            print_info(f"Using Microsoft tenant: {tenant_id}")
+        else:
+            print_warning(
+                "No --tenant-id provided; using 'common'.\n"
+                "  • For personal Microsoft accounts: your Azure app must be registered with\n"
+                "    'Accounts in any organizational directory and personal Microsoft accounts'.\n"
+                "  • For work/school only: use --tenant-id organizations\n"
+                "  • For a single Azure AD tenant: use --tenant-id <your-tenant-id>"
+            )
     
     # Build configuration
     config_data = {
@@ -231,6 +282,9 @@ def update_provider(args):
     if args.enabled is not None:
         updates["is_enabled"] = args.enabled
     
+    if args.scopes:
+        updates["scopes"] = [s.strip() for s in args.scopes.split(",")]
+
     if args.settings:
         settings = {}
         for setting in args.settings:
@@ -443,6 +497,13 @@ Supported Providers:
     create_parser.add_argument("--redirect-url", help="Default redirect URL for OAuth callbacks")
     create_parser.add_argument("--disabled", action="store_true", help="Create provider in disabled state")
     create_parser.add_argument("--settings", action="append", help="Custom settings (key=value format)")
+    create_parser.add_argument(
+        "--tenant-id",
+        help=(
+            "Microsoft only: Azure AD tenant ID (or 'common' / 'consumers' / 'organizations'). "
+            "Defaults to the MICROSOFT_TENANT_ID env var, then 'common'."
+        ),
+    )
     create_parser.set_defaults(func=create_provider)
     
     # Update command
@@ -453,6 +514,7 @@ Supported Providers:
     update_parser.add_argument("--redirect-url", help="New default redirect URL")
     update_parser.add_argument("--enabled", type=lambda x: x.lower() in ['true', '1', 'yes'], 
                               help="Enable or disable the provider (true/false)")
+    update_parser.add_argument("--scopes", help="Comma-separated list of OAuth scopes to set (e.g. 'openid,profile,email,offline_access')")
     update_parser.add_argument("--settings", action="append", help="Custom settings to update (key=value format)")
     update_parser.set_defaults(func=update_provider)
     

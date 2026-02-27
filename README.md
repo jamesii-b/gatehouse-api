@@ -104,8 +104,17 @@ The API will be available at `http://localhost:5000`
 - `DELETE /api/v1/organizations/:id/members/:userId` - Remove member
 - `PATCH /api/v1/organizations/:id/members/:userId/role` - Update role
 
+
 ### Health
 - `GET /api/health` - Health check
+
+
+## O-auth Setup
+
+- Redirect URI
+
+```http://localhost:5000/api/v1/auth/external/[google|microsoft]/callback```
+
 
 ## API Response Format
 

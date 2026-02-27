@@ -190,9 +190,9 @@ class OIDCService:
         logger.debug("[OIDC SERVICE] Auth code expires_at (UTC): %s", auth_code.expires_at.isoformat() + "Z")
         logger.debug("[OIDC SERVICE] Current UTC time after creating auth code: %s", datetime.now(timezone.utc).isoformat() + "Z")
         
-        # Log authorization event
+        # Log authorization event — use client.id (UUID) not client_id (string) for FK
         OIDCAuditService.log_authorization_event(
-            client_id=client_id,
+            client_id=client.id,
             user_id=user_id,
             success=True,
             redirect_uri=redirect_uri,
@@ -264,7 +264,7 @@ class OIDCService:
         if not auth_code:
             logger.error(f"[OIDC] Validate auth code - Code not found or deleted: code_hash={code_hash[:20]}...")
             OIDCAuditService.log_authorization_event(
-                client_id=client_id,
+                client_id=client.id,
                 success=False,
                 error_code="invalid_grant",
                 error_description="Invalid or expired authorization code",
@@ -275,7 +275,7 @@ class OIDCService:
         if auth_code.is_used:
             logger.error(f"[OIDC] Validate auth code - Code already used: code_hash={code_hash[:20]}..., user_id={auth_code.user_id}")
             OIDCAuditService.log_authorization_event(
-                client_id=client_id,
+                client_id=client.id,
                 user_id=auth_code.user_id,
                 success=False,
                 error_code="invalid_grant",
@@ -297,7 +297,7 @@ class OIDCService:
             logger.error("[OIDC] Validate auth code - Code expired: code_hash=%s..., expires_at (UTC)=%s, current UTC time=%s",
                         code_hash[:20], auth_code.expires_at.isoformat() + "Z", datetime.now(timezone.utc).isoformat() + "Z")
             OIDCAuditService.log_authorization_event(
-                client_id=client_id,
+                client_id=client.id,
                 user_id=auth_code.user_id,
                 success=False,
                 error_code="invalid_grant",
@@ -324,7 +324,7 @@ class OIDCService:
             if expected_challenge != auth_code.code_verifier:
                 logger.error(f"[OIDC] Validate auth code - Invalid code_verifier: expected={expected_challenge[:20]}..., got={auth_code.code_verifier[:20]}...")
                 OIDCAuditService.log_authorization_event(
-                    client_id=client_id,
+                    client_id=client.id,
                     user_id=auth_code.user_id,
                     success=False,
                     error_code="invalid_grant",
@@ -526,9 +526,9 @@ class OIDCService:
             expires_at=id_token_expires_at,
         )
         
-        # Log token event
+        # Log token event — use client.id (UUID) not client_id (string) for FK
         OIDCAuditService.log_token_event(
-            client_id=client_id,
+            client_id=client.id,
             user_id=user_id,
             token_type="access_token",
             success=True,
@@ -607,7 +607,7 @@ class OIDCService:
         
         if not refresh_token_obj:
             OIDCAuditService.log_token_event(
-                client_id=client_id,
+                client_id=client.id,
                 success=False,
                 error_code="invalid_grant",
                 error_description="Invalid refresh token",
@@ -627,7 +627,7 @@ class OIDCService:
         
         if not refresh_token_obj.is_valid():
             OIDCAuditService.log_token_event(
-                client_id=client_id,
+                client_id=client.id,
                 user_id=refresh_token_obj.user_id,
                 success=False,
                 error_code="invalid_grant",
@@ -694,9 +694,9 @@ class OIDCService:
             expires_at=access_token_expires_at,
         )
         
-        # Log refresh event
+        # Log refresh event — use client.id (UUID) not client_id (string) for FK
         OIDCAuditService.log_token_event(
-            client_id=client_id,
+            client_id=client.id,
             user_id=refresh_token_obj.user_id,
             token_type="access_token",
             success=True,
@@ -754,9 +754,14 @@ class OIDCService:
             logger.error("[OIDC SERVICE] Token validation failed: %s: %s", type(e).__name__, str(e))
             import traceback
             logger.error("[OIDC SERVICE] Traceback: %s", traceback.format_exc())
+            # Resolve internal client UUID for FK if possible
+            _client_db_id = None
+            if client_id:
+                _c = OIDCClient.query.filter_by(client_id=client_id).first()
+                _client_db_id = _c.id if _c else None
             OIDCAuditService.log_event(
                 event_type="token_validation",
-                client_id=client_id,
+                client_id=_client_db_id,
                 success=False,
                 error_code="invalid_token",
                 error_description=str(e),
@@ -806,7 +811,7 @@ class OIDCService:
                 revoked = True
                 
                 OIDCAuditService.log_token_revocation_event(
-                    client_id=client_id,
+                    client_id=client.id,
                     user_id=refresh_token.user_id,
                     token_type="refresh_token",
                     reason="revoked_by_client",
@@ -828,7 +833,7 @@ class OIDCService:
                         revoked = True
                         
                         OIDCAuditService.log_token_revocation_event(
-                            client_id=client_id,
+                            client_id=client.id,
                             user_id=claims.get("sub"),
                             token_type="access_token",
                             reason="revoked_by_client",
@@ -859,10 +864,14 @@ class OIDCService:
         """
         result = OIDCTokenService.introspect_token(token, client_id)
         
-        # Log introspection
+        # Log introspection — resolve internal client UUID for FK
+        _introspect_client_db_id = None
+        if client_id:
+            _ic = OIDCClient.query.filter_by(client_id=client_id).first()
+            _introspect_client_db_id = _ic.id if _ic else None
         OIDCAuditService.log_event(
             event_type="token_introspection",
-            client_id=client_id,
+            client_id=_introspect_client_db_id,
             user_id=result.get("sub"),
             success=result.get("active", False),
             metadata={"active": result.get("active")},
@@ -949,12 +958,17 @@ class OIDCService:
         
         logger.debug("[OIDC SERVICE] Final userinfo: %s", userinfo)
         
-        # Log userinfo access
+        # Log userinfo access — resolve internal client UUID for FK
         logger.debug("[OIDC SERVICE] Logging userinfo access event...")
+        _userinfo_client_id_str = claims.get("client_id")
+        _userinfo_client_db_id = None
+        if _userinfo_client_id_str:
+            _uc = OIDCClient.query.filter_by(client_id=_userinfo_client_id_str).first()
+            _userinfo_client_db_id = _uc.id if _uc else None
         OIDCAuditService.log_userinfo_event(
             access_token=access_token,
             user_id=user_id,
-            client_id=claims.get("client_id"),
+            client_id=_userinfo_client_db_id,
             success=True,
             scopes_claimed=scopes,
         )

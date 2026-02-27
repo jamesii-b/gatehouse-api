@@ -1106,6 +1106,7 @@ class ExternalAuthService:
     def _build_authorization_url(config: ProviderConfigAdapter, state: OAuthState) -> str:
         """Build authorization URL using the provider config adapter."""
         from urllib.parse import urlencode
+        provider = (config.provider_type or "").lower()
 
         params = {
             "client_id": config.client_id,
@@ -1113,9 +1114,25 @@ class ExternalAuthService:
             "response_type": "code",
             "scope": " ".join(config.scopes or ["openid", "profile", "email"]),
             "state": state.state,
-            "access_type": config.settings.get("access_type", "offline") if config.settings else "offline",
-            "prompt": config.settings.get("prompt", "consent") if config.settings else "consent",
         }
+
+        if provider == "google":
+            params["access_type"] = (
+                config.settings.get("access_type", "offline") if config.settings else "offline"
+            )
+            params["prompt"] = (
+                config.settings.get("prompt", "consent") if config.settings else "consent"
+            )
+        elif provider == "microsoft":
+            params["prompt"] = (
+                config.settings.get("prompt", "select_account") if config.settings else "select_account"
+            )
+        else:
+            if config.settings:
+                if "prompt" in config.settings:
+                    params["prompt"] = config.settings["prompt"]
+                if "access_type" in config.settings:
+                    params["access_type"] = config.settings["access_type"]
 
         if state.nonce:
             params["nonce"] = state.nonce
@@ -1178,17 +1195,26 @@ class ExternalAuthService:
         """Get user info from provider using the provider config adapter."""
         import requests
 
+        provider = (config.provider_type or "").lower()
         headers = {"Authorization": f"Bearer {access_token}"}
         response = requests.get(config.userinfo_url, headers=headers)
         response.raise_for_status()
 
         data = response.json()
 
+        # Microsoft's /oidc/userinfo endpoint returns verified email addresses
+        # (all AAD accounts are verified) but may omit the email_verified claim.
+        # Default to True for Microsoft so users aren't stuck with unverified state.
+        if provider == "microsoft":
+            email_verified = data.get("email_verified", True)
+        else:
+            email_verified = data.get("email_verified", False)
+
         # Standardize user info
         return {
             "provider_user_id": data.get("sub"),
             "email": data.get("email"),
-            "email_verified": data.get("email_verified", False),
+            "email_verified": email_verified,
             "name": data.get("name"),
             "first_name": data.get("given_name"),
             "last_name": data.get("family_name"),

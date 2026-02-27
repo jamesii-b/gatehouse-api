@@ -1,4 +1,5 @@
 """External authentication provider endpoints."""
+import json
 import logging
 from flask import request, g
 from marshmallow import ValidationError
@@ -15,6 +16,35 @@ from gatehouse_app.services.oauth_flow_service import (
     OAuthFlowError,
 )
 from gatehouse_app.services.audit_service import AuditService
+
+_OAUTH_BRIDGE_TTL = 600  # 10 minutes
+
+
+def _store_oidc_bridge(oauth_state: str, oidc_session_id: str) -> None:
+    """Store oidc_session_id keyed by OAuth state for retrieval in callback."""
+    try:
+        import gatehouse_app.extensions as _ext
+        rc = _ext.redis_client
+        if rc is not None:
+            rc.setex(f"oauth_oidc_bridge:{oauth_state}", _OAUTH_BRIDGE_TTL, oidc_session_id)
+    except Exception:
+        pass
+
+
+def _pop_oidc_bridge(oauth_state: str) -> str | None:
+    """Retrieve and delete oidc_session_id for the given OAuth state."""
+    try:
+        import gatehouse_app.extensions as _ext
+        rc = _ext.redis_client
+        if rc is not None:
+            key = f"oauth_oidc_bridge:{oauth_state}"
+            val = rc.get(key)
+            if val:
+                rc.delete(key)
+                return val.decode() if isinstance(val, bytes) else val
+    except Exception:
+        pass
+    return None
 
 logger = logging.getLogger(__name__)
 
@@ -53,63 +83,50 @@ def list_providers():
         200: List of providers with their configuration status
         401: Not authenticated
     """
-    from gatehouse_app.models import Organization
+    from gatehouse_app.models.authentication_method import ApplicationProviderConfig
     from gatehouse_app.services.external_auth_service import ExternalProviderConfig
 
-    # Get user's primary organization
+    # Check app-level provider configs (ApplicationProviderConfig)
+    app_configs = {
+        c.provider_type.lower(): c
+        for c in ApplicationProviderConfig.query.filter_by(is_enabled=True).all()
+    }
+
+    # Get user's primary organization — check for org-level overrides too
     user_orgs = g.current_user.get_organizations()
-    if not user_orgs:
-        return api_response(
-            success=False,
-            message="No organizations found for user",
-            status=400,
-            error_type="BAD_REQUEST",
-        )
+    org_configs = {}
+    if user_orgs:
+        organization_id = user_orgs[0].id
+        org_level = ExternalProviderConfig.query.filter_by(
+            organization_id=organization_id,
+        ).all()
+        org_configs = {c.provider_type.lower(): c for c in org_level}
 
-    organization_id = user_orgs[0].id
+    def provider_info(provider_id: str, name: str) -> dict:
+        app_cfg = app_configs.get(provider_id)
+        org_cfg = org_configs.get(provider_id)
+        is_configured = app_cfg is not None or org_cfg is not None
+        is_active = False
+        if app_cfg:
+            is_active = bool(app_cfg.is_enabled)
+        if org_cfg and hasattr(org_cfg, "is_active"):
+            is_active = bool(org_cfg.is_active)
+        return {
+            "id": provider_id,
+            "name": name,
+            "type": provider_id,
+            "is_configured": is_configured,
+            "is_active": is_active,
+            "settings": {
+                "requires_domain": False,
+                "supports_refresh_tokens": True,
+            },
+        }
 
-    # Get all configured providers for organization
-    configs = ExternalProviderConfig.query.filter_by(
-        organization_id=organization_id,
-    ).all()
-
-    configured_providers = {c.provider_type.lower(): c for c in configs}
-
-    # Provider definitions
     providers = [
-        {
-            "id": "google",
-            "name": "Google",
-            "type": "google",
-            "is_configured": "google" in configured_providers,
-            "is_active": configured_providers.get("google", {}).is_active if "google" in configured_providers else False,
-            "settings": {
-                "requires_domain": False,
-                "supports_refresh_tokens": True,
-            },
-        },
-        {
-            "id": "github",
-            "name": "GitHub",
-            "type": "github",
-            "is_configured": "github" in configured_providers,
-            "is_active": configured_providers.get("github", {}).is_active if "github" in configured_providers else False,
-            "settings": {
-                "requires_domain": False,
-                "supports_refresh_tokens": True,
-            },
-        },
-        {
-            "id": "microsoft",
-            "name": "Microsoft",
-            "type": "microsoft",
-            "is_configured": "microsoft" in configured_providers,
-            "is_active": configured_providers.get("microsoft", {}).is_active if "microsoft" in configured_providers else False,
-            "settings": {
-                "requires_domain": False,
-                "supports_refresh_tokens": True,
-            },
-        },
+        provider_info("google", "Google"),
+        provider_info("github", "GitHub"),
+        provider_info("microsoft", "Microsoft"),
     ]
 
     return api_response(
@@ -564,6 +581,7 @@ def initiate_oauth_authorize(provider: str):
     flow = request.args.get("flow", "login")
     redirect_uri = request.args.get("redirect_uri")
     organization_id = request.args.get("organization_id")  # Optional hint
+    oidc_session_id = request.args.get("oidc_session_id")  # OIDC bridge passthrough
 
     if flow not in ["login", "register"]:
         return api_response(
@@ -588,6 +606,11 @@ def initiate_oauth_authorize(provider: str):
                 redirect_uri=redirect_uri,
             )
 
+        # If this authorize was triggered during an OIDC bridge flow, remember
+        # the oidc_session_id so we can hand it back in the callback.
+        if oidc_session_id:
+            _store_oidc_bridge(state, oidc_session_id)
+
         return api_response(
             data={
                 "authorization_url": auth_url,
@@ -609,189 +632,141 @@ def initiate_oauth_authorize(provider: str):
 def handle_oauth_callback(provider: str):
     """
     Handle OAuth callback from provider.
-    
-    This endpoint handles the redirect from the OAuth provider after authentication.
-    It processes the response and handles different scenarios:
-    - Successful login/register with redirect_uri: Redirects with authorization code
-    - Successful login/register without redirect_uri: Returns session token
-    - Login with multiple orgs: Returns list of organizations for user to select
-    - Register with no org: Prompts for organization creation/selection
+
+    Google (and other providers) redirect the browser here after authentication.
+    On success, this endpoint redirects the browser to the frontend
+    /oauth/callback page carrying the session token as a URL parameter so the
+    frontend SPA can store it without needing a second API call.
+
+    Success redirect:
+        {FRONTEND_URL}/oauth/callback?token=TOKEN&expires_in=86400&state=STATE&flow=login&provider=google
+
+    Error redirect:
+        {FRONTEND_URL}/oauth/callback?error=MESSAGE&error_type=TYPE&state=STATE
 
     Args:
         provider: Provider type (google, github, microsoft)
 
-    Query parameters:
-        code: Authorization code from provider
-        state: State parameter from OAuth flow
-        redirect_uri: Optional redirect URI for OAuth 2.0 Authorization Code flow
+    Query parameters from provider:
+        code: Authorization code
+        state: State parameter (CSRF token from OAuth flow)
         error: Error code if auth failed at provider
         error_description: Human-readable error description
-
-    Returns:
-        302: Redirect with authorization code (if redirect_uri provided)
-        200: OAuth flow completed successfully (JSON response)
-        400: Validation error, OAuth error, or invalid state
-        404: User account not found (for login flows)
-        
-    Response formats (when redirect_uri NOT provided):
-        
-        Success with session:
-        {
-            "token": "session_token",
-            "expires_in": 86400,
-            "token_type": "Bearer",
-            "user": {...}
-        }
-        
-        Requires organization selection (login flow):
-        {
-            "requires_org_selection": true,
-            "user": {...},
-            "available_organizations": [...],
-            "state": "state_token"
-        }
-        
-        Requires organization creation (register flow):
-        {
-            "requires_org_creation": true,
-            "user": {...},
-            "state": "state_token"
-        }
     """
+    from urllib.parse import urlencode
+    from flask import current_app, redirect as flask_redirect
+
     provider_type = get_provider_type(provider)
 
-    # Get callback parameters
-    authorization_code = request.args.get("code")
     state = request.args.get("state")
+    authorization_code = request.args.get("code")
     error = request.args.get("error")
     error_description = request.args.get("error_description")
 
-    # Get redirect URI from query parameter (for OAuth 2.0 Authorization Code flow)
-    redirect_uri = request.args.get("redirect_uri")
+    frontend_url = current_app.config.get("FRONTEND_URL", "http://localhost:8080")
+    frontend_callback = f"{frontend_url}/oauth/callback"
+
+    def redirect_error(message: str, error_type: str = "OAUTH_ERROR"):
+        """Redirect to frontend with error params."""
+        params = {"error": message, "error_type": error_type}
+        if state:
+            params["state"] = state
+        return flask_redirect(f"{frontend_callback}?{urlencode(params)}", code=302)
+
+    # Handle errors returned by the provider (e.g. user denied)
+    if error:
+        msg = error_description or f"Authorization failed: {error}"
+        return redirect_error(msg, error.upper())
+
+    if not authorization_code or not state:
+        return redirect_error("Missing authorization code or state parameter.")
 
     try:
         result = OAuthFlowService.handle_callback(
             provider_type=provider_type,
             authorization_code=authorization_code,
             state=state,
-            redirect_uri=redirect_uri,
-            error=error,
-            error_description=error_description,
+            redirect_uri=None,  # backend handles the full flow
+            error=None,
+            error_description=None,
         )
 
-        if result.get("success"):
-            flow_type = result.get("flow_type")
-            
-            # Check if we should redirect with authorization code
-            if redirect_uri and flow_type in ["login", "register"]:
-                # Generate authorization code for external application
-                user_id = result.get("user", {}).get("id")
-                if not user_id:
-                    # For org selection/creation flows, we can't redirect
-                    pass
-                else:
-                    # Determine organization_id
-                    organization_id = result.get("user", {}).get("organization_id")
-                    if not organization_id:
-                        # Can't redirect without organization
-                        pass
-                    else:
-                        # Generate authorization code
-                        auth_code = OAuthFlowService.generate_authorization_code(
-                            user_id=user_id,
-                            client_id="external-app",
-                            redirect_uri=redirect_uri,
-                            scope=["openid", "profile", "email"],
-                            ip_address=request.remote_addr,
-                            user_agent=request.headers.get("User-Agent"),
-                            lifetime_seconds=600,  # 10 minutes
-                        )
-                        
-                        # Mark state as used
-                        state_record = OAuthFlowService.validate_state(state)
-                        if state_record:
-                            state_record.mark_used()
-                        
-                        # Redirect with authorization code
-                        return OAuthFlowService.create_redirect_response(
-                            redirect_uri=redirect_uri,
-                            authorization_code=auth_code,
-                            state=state,
-                        )
-            
-            # Handle login flow responses (no redirect_uri or org selection required)
-            if flow_type == "login":
-                # Check if organization selection is required
-                if result.get("requires_org_selection"):
-                    return api_response(
-                        data={
-                            "requires_org_selection": True,
-                            "user": result["user"],
-                            "available_organizations": result["available_organizations"],
-                            "state": result["state"],
-                        },
-                        message="Please select an organization to continue",
-                        status=200,
-                    )
-                
-                # Normal login with session
-                return api_response(
-                    data={
-                        "token": result["session"]["token"],
-                        "expires_in": result["session"].get("expires_in", 86400),
-                        "token_type": "Bearer",
-                        "user": result["user"],
-                    },
-                    message="Login successful",
-                )
-            
-            # Handle register flow responses
-            elif flow_type == "register":
-                # Check if organization creation is required
-                if result.get("requires_org_creation"):
-                    return api_response(
-                        data={
-                            "requires_org_creation": True,
-                            "user": result["user"],
-                            "state": result["state"],
-                        },
-                        message="Please create or select an organization to continue",
-                        status=200,
-                    )
-                
-                # Normal registration with session
-                return api_response(
-                    data={
-                        "token": result["session"]["token"],
-                        "expires_in": result["session"].get("expires_in", 86400),
-                        "token_type": "Bearer",
-                        "user": result["user"],
-                    },
-                    message="Registration successful",
-                )
-            
-            # Handle link flow responses
-            elif flow_type == "link":
-                return api_response(
-                    data={
-                        "linked_account": result["linked_account"],
-                    },
-                    message="Account linked successfully",
-                )
+        if not result.get("success"):
+            return redirect_error("Authentication failed.", "AUTH_FAILED")
 
-        # Fallback for unexpected result format
-        return api_response(
-            data=result,
-            message="OAuth flow completed",
+        flow_type = result.get("flow_type", "login")
+
+        # ── Link flow: redirect to linked-accounts page ──────────────────────
+        if flow_type == "link":
+            params = {"flow": "link", "provider": provider, "linked": "1"}
+            return flask_redirect(f"{frontend_url}/linked-accounts?{urlencode(params)}", code=302)
+
+        # ── Login / Register flow ─────────────────────────────────────────────
+
+        # Recover oidc_session_id if this was triggered from an OIDC bridge flow
+        oidc_session_id = _pop_oidc_bridge(state)
+
+        # Organization selection needed (user belongs to multiple orgs)
+        if result.get("requires_org_selection"):
+            import json
+            orgs = json.dumps(result.get("available_organizations", []))
+            params = {
+                "requires_org_selection": "1",
+                "state": result["state"],
+                "provider": provider,
+                "flow": flow_type,
+                "orgs": orgs,
+            }
+            if oidc_session_id:
+                params["oidc_session_id"] = oidc_session_id
+            return flask_redirect(f"{frontend_callback}?{urlencode(params)}", code=302)
+
+        # Organization creation needed (new user via OAuth with no org)
+        if result.get("requires_org_creation"):
+            params = {
+                "requires_org_creation": "1",
+                "state": result["state"],
+                "provider": provider,
+                "flow": flow_type,
+            }
+            if oidc_session_id:
+                params["oidc_session_id"] = oidc_session_id
+            return flask_redirect(f"{frontend_callback}?{urlencode(params)}", code=302)
+
+        # Normal success — carry token to frontend via URL
+        session_data = result.get("session", {})
+        token = session_data.get("token")
+        expires_in = session_data.get("expires_in", 86400)
+
+        if not token:
+            return redirect_error("No session token returned by server.", "NO_TOKEN")
+
+        params = {
+            "token": token,
+            "expires_in": str(expires_in),
+            "flow": flow_type,
+            "provider": provider,
+            "state": state,
+        }
+        user_info = result.get("user", {})
+        if user_info.get("email"):
+            params["email"] = user_info["email"]
+        # Pass oidc_session_id through so the frontend can complete the OIDC flow
+        if oidc_session_id:
+            params["oidc_session_id"] = oidc_session_id
+
+        logger.info(
+            f"OAuth callback success: provider={provider}, flow={flow_type}, "
+            f"user={user_info.get('email')}, redirecting to frontend"
         )
+        return flask_redirect(f"{frontend_callback}?{urlencode(params)}", code=302)
 
     except OAuthFlowError as e:
-        return api_response(
-            success=False,
-            message=e.message,
-            status=e.status_code,
-            error_type=e.error_type,
-        )
+        logger.warning(f"OAuth callback OAuthFlowError: {e.message}")
+        return redirect_error(e.message, e.error_type)
+    except Exception as e:
+        logger.error(f"OAuth callback unexpected error: {str(e)}", exc_info=True)
+        return redirect_error("An unexpected error occurred. Please try again.", "INTERNAL_ERROR")
 
 
 @api_v1_bp.route("/auth/external/select-organization", methods=["POST"])

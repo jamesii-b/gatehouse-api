@@ -19,9 +19,52 @@ from gatehouse_app.services.auth_service import AuthService
 from gatehouse_app.services.mfa_policy_service import MfaPolicyService
 from gatehouse_app.extensions import db
 from gatehouse_app.extensions import bcrypt as flask_bcrypt
+from gatehouse_app.extensions import redis_client as _redis_client_ref  # may be None until app init
 from gatehouse_app.models import User, OIDCClient
 from gatehouse_app.models.organization import Organization
 from gatehouse_app.exceptions.auth_exceptions import InvalidCredentialsError
+
+# ---------------------------------------------------------------------------
+# Helpers for Redis-backed OIDC pending state
+# (avoids Flask session / cookie dependency for cross-origin /oidc/complete)
+# ---------------------------------------------------------------------------
+
+_OIDC_PENDING_TTL = 600  # 10 minutes
+
+
+def _oidc_redis():
+    """Return the shared Redis client, or None if not yet initialised."""
+    import gatehouse_app.extensions as _ext
+    return _ext.redis_client
+
+
+def _stash_oidc_params(oidc_session_id: str, params: dict) -> None:
+    """Store OIDC params in Redis with a TTL.  Falls back to Flask session."""
+    rc = _oidc_redis()
+    key = f"oidc_pending:{oidc_session_id}"
+    if rc is not None:
+        rc.setex(key, _OIDC_PENDING_TTL, json.dumps(params))
+    else:
+        session[f"oidc_pending_{oidc_session_id}"] = params
+
+
+def _fetch_oidc_params(oidc_session_id: str, *, consume: bool = False) -> dict | None:
+    """Retrieve (and optionally delete) OIDC params from Redis / Flask session."""
+    rc = _oidc_redis()
+    key = f"oidc_pending:{oidc_session_id}"
+    if rc is not None:
+        raw = rc.get(key)
+        if raw is None:
+            return None
+        params = json.loads(raw)
+        if consume:
+            rc.delete(key)
+        return params
+    else:
+        params = session.get(f"oidc_pending_{oidc_session_id}")
+        if params and consume:
+            session.pop(f"oidc_pending_{oidc_session_id}", None)
+        return params
 
 
 # Create OIDC blueprint registered at root level
@@ -215,6 +258,134 @@ def oidc_discovery():
     response = jsonify(config)
     response.headers["Cache-Control"] = "max-age=86400"
     return response, 200
+
+
+# ============================================================================
+# OIDC UI Bridge — lets the React frontend drive the OIDC login flow
+# ============================================================================
+
+@oidc_bp.route("/oidc/begin", methods=["POST"])
+def oidc_begin():
+    """Stash OIDC authorize params server-side, return a one-time session ID.
+
+    Called by the React UI after being redirected from _show_login_page.
+    The UI cannot hold OIDC params itself (XSS risk, URL length limits), so
+    the backend stashes them in the server-side session store and hands back
+    an opaque ID the UI passes along during login.
+
+    Request body (JSON):
+        oidc_session_id: ID previously issued by _show_login_page
+    
+    Returns:
+        200: { oidc_session_id, client_name, scopes }  — context for the UI
+        400: missing / expired session
+    """
+    data = request.get_json(silent=True) or {}
+    oidc_session_id = data.get("oidc_session_id") or request.args.get("oidc_session_id")
+    if not oidc_session_id:
+        return api_response(success=False, message="oidc_session_id required", status=400)
+
+    params = _fetch_oidc_params(oidc_session_id)
+    if not params:
+        return api_response(success=False, message="OIDC session expired or invalid", status=400)
+
+    # Look up client name for display
+    client = OIDCClient.query.filter_by(client_id=params.get("client_id"), is_active=True).first()
+    client_name = client.name if client else params.get("client_id", "Unknown Application")
+
+    return api_response(
+        data={
+            "oidc_session_id": oidc_session_id,
+            "client_name": client_name,
+            "scopes": params.get("scope", "").split(),
+            "redirect_uri": params.get("redirect_uri"),
+        },
+        message="OIDC session found",
+    )
+
+
+@oidc_bp.route("/oidc/complete", methods=["POST"])
+def oidc_complete():
+    """Complete an OIDC authorization flow after the UI has authenticated the user.
+
+    Called by the React UI after a successful login. The UI sends its Bearer
+    token + the oidc_session_id. The backend:
+      1. Validates the Bearer token → resolves the user
+      2. Retrieves the stashed OIDC params
+      3. Generates an authorization code
+      4. Returns the redirect URL (client app redirect_uri + ?code=...&state=...)
+
+    The UI then does window.location.href = redirect_url.
+
+    Request body (JSON):
+        oidc_session_id: ID from oidc_begin
+        token: Gatehouse Bearer token (from /api/v1/auth/login response)
+
+    Returns:
+        200: { redirect_url }
+        400: invalid request
+        401: invalid token
+    """
+    from gatehouse_app.models.session import Session as GHSession
+    from gatehouse_app.utils.constants import SessionStatus
+
+    data = request.get_json(silent=True) or {}
+    oidc_session_id = data.get("oidc_session_id")
+    bearer_token = data.get("token")
+
+    if not oidc_session_id or not bearer_token:
+        return api_response(success=False, message="oidc_session_id and token required", status=400)
+
+    # Validate the Bearer token
+    gh_session = GHSession.query.filter_by(token=bearer_token, status=SessionStatus.ACTIVE).first()
+    if not gh_session or gh_session.is_expired():
+        return api_response(success=False, message="Invalid or expired token", status=401)
+
+    user_id = str(gh_session.user_id)
+
+    # Retrieve stashed OIDC params (consume = True removes from Redis atomically)
+    params = _fetch_oidc_params(oidc_session_id, consume=True)
+    if not params:
+        return api_response(success=False, message="OIDC session expired or invalid", status=400)
+
+    client_id = params["client_id"]
+    redirect_uri = params["redirect_uri"]
+    state = params.get("state", "")
+    nonce = params.get("nonce", "")
+    scope = params.get("scope", "openid")
+    response_type = params.get("response_type", "code")
+
+    # Validate client still exists
+    client = OIDCClient.query.filter_by(client_id=client_id, is_active=True).first()
+    if not client:
+        return api_response(success=False, message="OIDC client not found", status=400)
+
+    # Generate authorization code
+    try:
+        valid_scopes = [s for s in scope.split() if s in (client.scopes or [])]
+        if not valid_scopes:
+            valid_scopes = ["openid"]
+
+        code = OIDCService.generate_authorization_code(
+            client_id=client_id,
+            user_id=user_id,
+            redirect_uri=redirect_uri,
+            scope=valid_scopes,
+            state=state,
+            nonce=nonce,
+            ip_address=request.remote_addr,
+            user_agent=request.headers.get("User-Agent"),
+        )
+    except Exception as e:
+        logger.error("[OIDC complete] Code generation failed: %s", str(e))
+        return api_response(success=False, message=f"Failed to generate authorization code: {e}", status=500)
+
+    redirect_params = {"code": code}
+    if state:
+        redirect_params["state"] = state
+    redirect_url = f"{redirect_uri}?{urlencode(redirect_params)}"
+
+    return api_response(data={"redirect_url": redirect_url}, message="Authorization complete")
 
 
 # ============================================================================
@@ -495,59 +666,30 @@ def _redirect_with_error(redirect_uri, error, error_description, state=None):
 
 
 def _show_login_page(client_id, redirect_uri, scope, state, nonce, response_type, error=None):
-    """Show the login page for authorization."""
-    # Simple HTML login page
-    html = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Sign In - OIDC Authorization</title>
-        <style>
-            body {{ font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }}
-            .container {{ max-width: 400px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
-            h1 {{ color: #333; font-size: 24px; margin-bottom: 20px; }}
-            .form-group {{ margin-bottom: 15px; }}
-            label {{ display: block; margin-bottom: 5px; color: #555; font-weight: bold; }}
-            input[type="email"], input[type="password"] {{ width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }}
-            button {{ width: 100%; padding: 12px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }}
-            button:hover {{ background: #0056b3; }}
-            .error {{ color: #dc3545; margin-bottom: 15px; }}
-            .cancel {{ text-align: center; margin-top: 15px; }}
-            .cancel a {{ color: #666; text-decoration: none; }}
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <h1>Sign In</h1>
-            {"<p class='error'>" + error + "</p>" if error else ""}
-            <form method="POST">
-                <input type="hidden" name="client_id" value="{client_id}">
-                <input type="hidden" name="redirect_uri" value="{redirect_uri}">
-                <input type="hidden" name="scope" value="{scope}">
-                <input type="hidden" name="state" value="{state}">
-                <input type="hidden" name="nonce" value="{nonce}">
-                <input type="hidden" name="response_type" value="{response_type}">
-                
-                <div class="form-group">
-                    <label for="email">Email</label>
-                    <input type="email" id="email" name="email" required>
-                </div>
-                
-                <div class="form-group">
-                    <label for="password">Password</label>
-                    <input type="password" id="password" name="password" required>
-                </div>
-                
-                <button type="submit">Sign In</button>
-            </form>
-            <p class="cancel">
-                <a href="{redirect_uri}">Cancel</a>
-            </p>
-        </div>
-    </body>
-    </html>
+    """Redirect to the Gatehouse React UI login page for a proper login experience.
+
+    Stashes the OIDC params in the server-side session keyed by a random ID,
+    then sends the browser to the React UI at /login?oidc_session_id=<id>.
+    The UI logs the user in and calls /oidc/complete to finish the flow.
     """
-    return Response(html, mimetype="text/html"), 200
+    ui_base_url = current_app.config.get("OIDC_UI_URL", "http://localhost:8080")
+
+    # Stash OIDC params in Redis (TTL 10 min) — cookie-free, cross-origin safe
+    oidc_session_id = secrets.token_urlsafe(32)
+    _stash_oidc_params(oidc_session_id, {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "scope": scope,
+        "state": state,
+        "nonce": nonce,
+        "response_type": response_type,
+    })
+
+    params = {"oidc_session_id": oidc_session_id}
+    if error:
+        params["error"] = error
+
+    return redirect(f"{ui_base_url}/login?{urlencode(params)}")
 
 
 # ============================================================================
@@ -1224,7 +1366,6 @@ def oidc_register():
         grant_types=data.get("grant_types", ["authorization_code", "refresh_token"]),
         response_types=data.get("response_types", ["code"]),
         scopes=data.get("scope", "openid profile email roles").split(),
-        token_endpoint_auth_method=data.get("token_endpoint_auth_method", "client_secret_basic"),
         is_active=True,
         is_confidential=True,
         require_pkce=True,

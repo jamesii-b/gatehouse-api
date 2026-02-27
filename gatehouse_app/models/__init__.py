@@ -29,6 +29,13 @@ from gatehouse_app.models.principal import (
     Principal,
     PrincipalMembership,
 )
+from gatehouse_app.models.ssh_key import SSHKey
+from gatehouse_app.models.ca import CA, KeyType, CertType
+from gatehouse_app.models.ssh_certificate import SSHCertificate, CertificateStatus
+from gatehouse_app.models.certificate_audit_log import CertificateAuditLog
+from gatehouse_app.models.password_reset_token import PasswordResetToken
+from gatehouse_app.models.email_verification_token import EmailVerificationToken
+from gatehouse_app.models.org_invite_token import OrgInviteToken
 
 __all__ = [
     "BaseModel",
@@ -55,4 +62,14 @@ __all__ = [
     "DepartmentPrincipal",
     "Principal",
     "PrincipalMembership",
+    "SSHKey",
+    "CA",
+    "KeyType",
+    "CertType",
+    "SSHCertificate",
+    "CertificateStatus",
+    "CertificateAuditLog",
+    "PasswordResetToken",
+    "EmailVerificationToken",
+    "OrgInviteToken",
 ]

@@ -48,3 +48,6 @@ Flask-Limiter==3.5.0
 # Logging
 python-json-logger==2.0.7
 qrcode[pil]
+
+# SSH CA Certificate signing
+sshkey-tools==0.11.0

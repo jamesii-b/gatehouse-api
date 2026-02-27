@@ -19,6 +19,21 @@ from gatehouse_app.exceptions.validation_exceptions import (
     OrganizationNotFoundError,
     UserNotFoundError,
 )
+from gatehouse_app.exceptions.ssh_exceptions import (
+    SSHCAError,
+    SSHKeyError,
+    SSHKeyNotFoundError,
+    SSHKeyAlreadyExistsError,
+    SSHKeyNotVerifiedError,
+    SSHCertificateError,
+    SSHCertificateNotFoundError,
+    CAError,
+    CANotFoundError,
+    PrincipalError,
+    PrincipalNotFoundError,
+    DepartmentError,
+    DepartmentNotFoundError,
+)
 
 __all__ = [
     "BaseAPIException",
@@ -37,4 +52,18 @@ __all__ = [
     "EmailAlreadyExistsError",
     "OrganizationNotFoundError",
     "UserNotFoundError",
+    "SSHCAError",
+    "SSHKeyError",
+    "SSHKeyNotFoundError",
+    "SSHKeyAlreadyExistsError",
+    "SSHKeyNotVerifiedError",
+    "SSHCertificateError",
+    "SSHCertificateNotFoundError",
+    "CAError",
+    "CANotFoundError",
+    "PrincipalError",
+    "PrincipalNotFoundError",
+    "DepartmentError",
+    "DepartmentNotFoundError",
 ]
+

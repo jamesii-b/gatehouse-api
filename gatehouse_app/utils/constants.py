@@ -12,6 +12,16 @@ class UserStatus(str, Enum):
     COMPLIANCE_SUSPENDED = "compliance_suspended"
 
 
+class Role(str, Enum):
+    """Generic role definitions (hierarchy: Admin > Manager > Member > Viewer > Guest)."""
+
+    ADMIN = "admin"
+    MANAGER = "manager"
+    MEMBER = "member"
+    VIEWER = "viewer"
+    GUEST = "guest"
+
+
 class OrganizationRole(str, Enum):
     """Organization member roles."""
 
@@ -104,6 +114,37 @@ class AuditAction(str, Enum):
     EXTERNAL_AUTH_CONFIG_CREATE = "external_auth.config.create"
     EXTERNAL_AUTH_CONFIG_UPDATE = "external_auth.config.update"
     EXTERNAL_AUTH_CONFIG_DELETE = "external_auth.config.delete"
+
+    # SSH Key and Certificate actions
+    SSH_KEY_ADDED = "ssh.key.added"
+    SSH_KEY_VERIFIED = "ssh.key.verified"
+    SSH_KEY_DELETED = "ssh.key.deleted"
+    SSH_KEY_VALIDATION_FAILED = "ssh.key.validation.failed"
+    SSH_CERT_REQUESTED = "ssh.cert.requested"
+    SSH_CERT_ISSUED = "ssh.cert.issued"
+    SSH_CERT_FAILED = "ssh.cert.failed"
+    SSH_CERT_REVOKED = "ssh.cert.revoked"
+    SSH_CERT_EXPIRED = "ssh.cert.expired"
+
+    # CA actions
+    CA_CREATED = "ca.created"
+    CA_UPDATED = "ca.updated"
+    CA_DELETED = "ca.deleted"
+    CA_KEY_ROTATED = "ca.key.rotated"
+
+    # Principal actions
+    PRINCIPAL_CREATED = "principal.created"
+    PRINCIPAL_UPDATED = "principal.updated"
+    PRINCIPAL_DELETED = "principal.deleted"
+    PRINCIPAL_MEMBER_ADDED = "principal.member.added"
+    PRINCIPAL_MEMBER_REMOVED = "principal.member.removed"
+
+    # Department actions
+    DEPARTMENT_CREATED = "department.created"
+    DEPARTMENT_UPDATED = "department.updated"
+    DEPARTMENT_DELETED = "department.deleted"
+    DEPARTMENT_MEMBER_ADDED = "department.member.added"
+    DEPARTMENT_MEMBER_REMOVED = "department.member.removed"
 
 
 class OIDCGrantType(str, Enum):

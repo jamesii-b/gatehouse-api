@@ -46,6 +46,33 @@ def _pop_oidc_bridge(oauth_state: str) -> str | None:
         pass
     return None
 
+
+def _store_cli_redirect(oauth_state: str, redirect_url: str) -> None:
+    """Store CLI redirect_url keyed by OAuth state (for /token_please flow)."""
+    try:
+        import gatehouse_app.extensions as _ext
+        rc = _ext.redis_client
+        if rc is not None:
+            rc.setex(f"oauth_cli_redirect:{oauth_state}", _OAUTH_BRIDGE_TTL, redirect_url)
+    except Exception:
+        pass
+
+
+def _pop_cli_redirect(oauth_state: str) -> str | None:
+    """Retrieve and delete CLI redirect_url for the given OAuth state."""
+    try:
+        import gatehouse_app.extensions as _ext
+        rc = _ext.redis_client
+        if rc is not None:
+            key = f"oauth_cli_redirect:{oauth_state}"
+            val = rc.get(key)
+            if val:
+                rc.delete(key)
+                return val.decode() if isinstance(val, bytes) else val
+    except Exception:
+        pass
+    return None
+
 logger = logging.getLogger(__name__)
 
 
@@ -67,6 +94,71 @@ def get_provider_type(provider: str) -> AuthMethodType:
             400,
         )
     return PROVIDER_TYPE_MAP[provider_lower]
+
+
+@api_v1_bp.route("/token_please", methods=["GET"])
+def token_please():
+    """
+    CLI token acquisition endpoint.
+
+    Initiates an OAuth login flow and, on success, redirects the user's browser
+    to the CLI's local callback server (redirect_url) with the session token
+    appended, e.g.:  http://127.0.0.1:8250/?token=<SESSION_TOKEN>
+
+    This endpoint is designed for CLI clients that:
+      1. Start a local HTTP server on LISTENER_SERVER_PORT (e.g. 8250)
+      2. Open a browser to  /api/v1/token_please?redirect_url=http://127.0.0.1:8250/?token=
+      3. Wait for the browser to POST the token back to their local server
+
+    Query parameters:
+        redirect_url: Local callback URL where the token will be appended
+        provider:     OAuth provider to use (default: 'google')
+    """
+    from urllib.parse import urlencode
+    from flask import current_app, redirect as flask_redirect
+
+    redirect_url = request.args.get("redirect_url", "").strip()
+    provider = request.args.get("provider", "google").lower()
+
+    if not redirect_url:
+        return api_response(
+            success=False,
+            message="redirect_url query parameter is required",
+            status=400,
+            error_type="MISSING_REDIRECT_URL",
+        )
+
+    # Validate redirect_url is localhost/127.0.0.1 (security: prevent open redirect)
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(redirect_url)
+    if parsed.hostname not in ("localhost", "127.0.0.1"):
+        return api_response(
+            success=False,
+            message="redirect_url must point to localhost",
+            status=400,
+            error_type="INVALID_REDIRECT_URL",
+        )
+
+    try:
+        provider_type = get_provider_type(provider)
+        auth_url, state = OAuthFlowService.initiate_login_flow(
+            provider_type=provider_type,
+            organization_id=None,
+            redirect_uri=None,
+        )
+    except (OAuthFlowError, ExternalAuthError) as e:
+        return api_response(
+            success=False,
+            message=getattr(e, "message", str(e)),
+            status=getattr(e, "status_code", 400),
+            error_type=getattr(e, "error_type", "OAUTH_ERROR"),
+        )
+
+    # Store the CLI redirect URL so the callback can use it
+    _store_cli_redirect(state, redirect_url)
+
+    logger.info(f"CLI token_please: provider={provider}, redirect_url={redirect_url}, redirecting to OAuth")
+    return flask_redirect(auth_url, code=302)
 
 
 # =============================================================================
@@ -575,8 +667,6 @@ def initiate_oauth_authorize(provider: str):
             "state": "state_token"
         }
     """
-    provider_type = get_provider_type(provider)
-
     # Get query parameters - organization_id is now optional
     flow = request.args.get("flow", "login")
     redirect_uri = request.args.get("redirect_uri")
@@ -592,7 +682,7 @@ def initiate_oauth_authorize(provider: str):
         )
 
     try:
-        # Initiate flow - organization_id is now optional
+        provider_type = get_provider_type(provider)
         if flow == "login":
             auth_url, state = OAuthFlowService.initiate_login_flow(
                 provider_type=provider_type,
@@ -620,6 +710,13 @@ def initiate_oauth_authorize(provider: str):
         )
 
     except OAuthFlowError as e:
+        return api_response(
+            success=False,
+            message=e.message,
+            status=e.status_code,
+            error_type=e.error_type,
+        )
+    except ExternalAuthError as e:
         return api_response(
             success=False,
             message=e.message,
@@ -666,8 +763,19 @@ def handle_oauth_callback(provider: str):
     frontend_url = current_app.config.get("FRONTEND_URL", "http://localhost:8080")
     frontend_callback = f"{frontend_url}/oauth/callback"
 
+    # Check if this is a CLI /token_please flow — retrieve stored redirect_url
+    cli_redirect_url = _pop_cli_redirect(state) if state else None
+
     def redirect_error(message: str, error_type: str = "OAUTH_ERROR"):
-        """Redirect to frontend with error params."""
+        """Redirect to frontend (or CLI) with error params."""
+        if cli_redirect_url:
+            # CLI flow: return a plain error page instead of redirecting back
+            from flask import make_response
+            return make_response(
+                f"<html><body><h2>Authentication Error</h2><p>{message}</p>"
+                f"<p>You may close this window.</p></body></html>",
+                400,
+            )
         params = {"error": message, "error_type": error_type}
         if state:
             params["state"] = state
@@ -706,8 +814,11 @@ def handle_oauth_callback(provider: str):
         # Recover oidc_session_id if this was triggered from an OIDC bridge flow
         oidc_session_id = _pop_oidc_bridge(state)
 
+        # Organization selection / creation flows are not supported in CLI mode
+        # (fall through to token redirect with whatever session we have)
+
         # Organization selection needed (user belongs to multiple orgs)
-        if result.get("requires_org_selection"):
+        if result.get("requires_org_selection") and not cli_redirect_url:
             import json
             orgs = json.dumps(result.get("available_organizations", []))
             params = {
@@ -722,7 +833,7 @@ def handle_oauth_callback(provider: str):
             return flask_redirect(f"{frontend_callback}?{urlencode(params)}", code=302)
 
         # Organization creation needed (new user via OAuth with no org)
-        if result.get("requires_org_creation"):
+        if result.get("requires_org_creation") and not cli_redirect_url:
             params = {
                 "requires_org_creation": "1",
                 "state": result["state"],
@@ -751,6 +862,19 @@ def handle_oauth_callback(provider: str):
         user_info = result.get("user", {})
         if user_info.get("email"):
             params["email"] = user_info["email"]
+
+        # ── CLI /token_please flow: redirect to the CLI's local callback ─────
+        if cli_redirect_url:
+            # The CLI expects: http://127.0.0.1:8250/?token=<TOKEN>
+            # cli_redirect_url already ends with "token=" so just append the value
+            cli_final_url = cli_redirect_url + token
+            logger.info(
+                f"CLI token_please success: provider={provider}, user={user_info.get('email')}, "
+                f"redirecting to CLI callback"
+            )
+            return flask_redirect(cli_final_url, code=302)
+
+        # ── Frontend flow ─────────────────────────────────────────────────────
         # Pass oidc_session_id through so the frontend can complete the OIDC flow
         if oidc_session_id:
             params["oidc_session_id"] = oidc_session_id

@@ -12,7 +12,7 @@ from gatehouse_app.models import User, AuthenticationMethod
 from gatehouse_app.models.authentication_method import OAuthState
 from gatehouse_app.models.base import BaseModel
 from gatehouse_app.models.oidc_authorization_code import OIDCAuthCode
-from gatehouse_app.utils.constants import AuthMethodType
+from gatehouse_app.utils.constants import AuthMethodType, AuditAction
 from gatehouse_app.services.audit_service import AuditService
 from gatehouse_app.services.external_auth_service import (
     ExternalAuthService,
@@ -139,7 +139,7 @@ class OAuthFlowService:
         except ExternalAuthError as e:
             # Log failed initiation
             AuditService.log_action(
-                action="external_auth.login.initiated",
+                action=AuditAction.EXTERNAL_AUTH_LOGIN_FAILED,
                 organization_id=organization_id,
                 metadata={
                     "provider_type": provider_type_str,
@@ -236,7 +236,7 @@ class OAuthFlowService:
 
         except ExternalAuthError as e:
             AuditService.log_action(
-                action="external_auth.register.initiated",
+                action=AuditAction.EXTERNAL_AUTH_LOGIN_FAILED,
                 organization_id=organization_id,
                 metadata={
                     "provider_type": provider_type_str,
@@ -397,6 +397,27 @@ class OAuthFlowService:
             user_info = ExternalAuthService._get_user_info(
                 config=config,
                 access_token=tokens["access_token"],
+            )
+
+            if not user_info.get("provider_user_id"):
+                raise OAuthFlowError(
+                    "Provider did not return a user identifier (sub claim). "
+                    "Cannot complete authentication.",
+                    "MISSING_PROVIDER_USER_ID",
+                    400,
+                )
+
+            if not user_info.get("email"):
+                raise OAuthFlowError(
+                    "Provider did not return an email address. "
+                    "Cannot complete authentication.",
+                    "MISSING_EMAIL",
+                    400,
+                )
+
+            logger.debug(
+                f"Got user_info from provider: sub={user_info['provider_user_id']}, "
+                f"email={user_info['email']}, email_verified={user_info.get('email_verified')}"
             )
 
             # Look up user by provider_user_id

@@ -55,6 +55,18 @@ class User(BaseModel):
         cascade="all, delete-orphan",
         foreign_keys="PrincipalMembership.user_id",
     )
+    ssh_keys = db.relationship(
+        "SSHKey",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="SSHKey.user_id",
+    )
+    ssh_certificates = db.relationship(
+        "SSHCertificate",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        foreign_keys="SSHCertificate.user_id",
+    )
 
     def __repr__(self):
         """String representation of User."""

@@ -40,6 +40,9 @@ class Organization(BaseModel):
     principals = db.relationship(
         "Principal", back_populates="organization", cascade="all, delete-orphan"
     )
+    cas = db.relationship(
+        "CA", back_populates="organization", cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
         """String representation of Organization."""

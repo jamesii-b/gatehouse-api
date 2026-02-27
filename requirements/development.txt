@@ -20,3 +20,25 @@ watchdog==3.0.0
 
 # Documentation
 sphinx==7.2.6
+
+# Web framework & Database
+Flask==3.0.0
+Flask-SQLAlchemy==3.1.1
+Flask-Migrate==4.0.5
+sqlalchemy-cockroachdb==2.0.3
+
+# Utilities
+colorlog==6.8.0
+coloredlogs==15.0.1
+prettytable==3.10.2
+tabulate==0.9.0
+requests==2.31.0
+pytz==2023.3
+python-dotenv==1.0.0
+pydantic==2.5.0
+PyJWT==2.8.0
+cryptography==41.0.7
+pycryptodome==3.20.0
+psycopg2==2.9.9
+sshkey-tools==0.10.3
+sendgrid==6.11.0

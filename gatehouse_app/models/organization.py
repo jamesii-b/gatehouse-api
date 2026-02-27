@@ -34,6 +34,12 @@ class Organization(BaseModel):
         cascade="all, delete-orphan",
         foreign_keys="OrganizationSecurityPolicy.organization_id",
     )
+    departments = db.relationship(
+        "Department", back_populates="organization", cascade="all, delete-orphan"
+    )
+    principals = db.relationship(
+        "Principal", back_populates="organization", cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
         """String representation of Organization."""

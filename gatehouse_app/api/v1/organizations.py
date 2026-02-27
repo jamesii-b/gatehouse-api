@@ -14,7 +14,7 @@ from gatehouse_app.services.organization_service import OrganizationService
 from gatehouse_app.services.user_service import UserService
 from gatehouse_app.utils.constants import OrganizationRole
 
-
+########jb- need to implement departs, principals
 @api_v1_bp.route("/organizations", methods=["POST"])
 @login_required
 @full_access_required

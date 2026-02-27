@@ -20,6 +20,15 @@ from gatehouse_app.models.oidc_audit_log import OIDCAuditLog
 from gatehouse_app.models.organization_security_policy import OrganizationSecurityPolicy
 from gatehouse_app.models.user_security_policy import UserSecurityPolicy
 from gatehouse_app.models.mfa_policy_compliance import MfaPolicyCompliance
+from gatehouse_app.models.department import (
+    Department,
+    DepartmentMembership,
+    DepartmentPrincipal,
+)
+from gatehouse_app.models.principal import (
+    Principal,
+    PrincipalMembership,
+)
 
 __all__ = [
     "BaseModel",
@@ -41,4 +50,9 @@ __all__ = [
     "OrganizationSecurityPolicy",
     "UserSecurityPolicy",
     "MfaPolicyCompliance",
+    "Department",
+    "DepartmentMembership",
+    "DepartmentPrincipal",
+    "Principal",
+    "PrincipalMembership",
 ]

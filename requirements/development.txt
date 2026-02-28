@@ -37,8 +37,8 @@ pytz==2023.3
 python-dotenv==1.0.0
 pydantic==2.5.0
 PyJWT==2.8.0
-cryptography==41.0.7
+cryptography==42.0.7
 pycryptodome==3.20.0
-psycopg2==2.9.9
-sshkey-tools==0.10.3
+psycopg2-binary==2.9.9
+sshkey-tools==0.11.3
 sendgrid==6.11.0

@@ -82,7 +82,10 @@ class BaseModel(db.Model):
             if column.name not in exclude:
                 value = getattr(self, column.name)
                 if isinstance(value, datetime):
-                    result[column.name] = value.isoformat()
+                    if value.tzinfo is None:
+                        result[column.name] = value.isoformat() + "Z"
+                    else:
+                        result[column.name] = value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
                 else:
                     result[column.name] = value
         return result

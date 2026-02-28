@@ -30,7 +30,7 @@ from gatehouse_app.models.principal import (
     PrincipalMembership,
 )
 from gatehouse_app.models.ssh_key import SSHKey
-from gatehouse_app.models.ca import CA, KeyType, CertType
+from gatehouse_app.models.ca import CA, KeyType, CertType, CAPermission
 from gatehouse_app.models.ssh_certificate import SSHCertificate, CertificateStatus
 from gatehouse_app.models.certificate_audit_log import CertificateAuditLog
 from gatehouse_app.models.password_reset_token import PasswordResetToken
@@ -66,6 +66,7 @@ __all__ = [
     "CA",
     "KeyType",
     "CertType",
+    "CAPermission",
     "SSHCertificate",
     "CertificateStatus",
     "CertificateAuditLog",

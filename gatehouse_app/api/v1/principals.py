@@ -8,6 +8,7 @@ from gatehouse_app.utils.decorators import login_required, require_admin, full_a
 from gatehouse_app.models import Principal, PrincipalMembership, Department, DepartmentPrincipal
 from gatehouse_app.services.organization_service import OrganizationService
 from gatehouse_app.services.user_service import UserService
+from gatehouse_app.exceptions import OrganizationNotFoundError
 from gatehouse_app.extensions import db
 
 
@@ -614,7 +615,10 @@ def link_principal_to_department(org_id, principal_id, dept_id):
         404: Organization, principal, or department not found
         409: Already linked
     """
-    org = OrganizationService.get_organization_by_id(org_id)
+    try:
+        org = OrganizationService.get_organization_by_id(org_id)
+    except OrganizationNotFoundError:
+        return api_response(success=False, message="Organization not found", status=404, error_type="NOT_FOUND")
 
     principal = Principal.query.filter_by(
         id=principal_id,
@@ -644,7 +648,6 @@ def link_principal_to_department(org_id, principal_id, dept_id):
             error_type="NOT_FOUND",
         )
 
-    # Check if already linked
     existing = DepartmentPrincipal.query.filter_by(
         department_id=dept_id,
         principal_id=principal_id,
@@ -659,13 +662,35 @@ def link_principal_to_department(org_id, principal_id, dept_id):
             error_type="CONFLICT",
         )
 
-    # Create link
-    link = DepartmentPrincipal(
-        department_id=dept_id,
-        principal_id=principal_id,
-    )
-    db.session.add(link)
-    db.session.commit()
+    soft_deleted = DepartmentPrincipal.query.filter(
+        DepartmentPrincipal.department_id == dept_id,
+        DepartmentPrincipal.principal_id == principal_id,
+        DepartmentPrincipal.deleted_at != None,  # noqa: E711
+    ).first()
+
+    try:
+        if soft_deleted:
+            soft_deleted.deleted_at = None
+        else:
+            link = DepartmentPrincipal(
+                department_id=dept_id,
+                principal_id=principal_id,
+            )
+            db.session.add(link)
+        db.session.commit()
+    except Exception as e:
+        db.session.rollback()
+        from gatehouse_app.extensions import db as _db
+        try:
+            _db.session.rollback()
+        except Exception:
+            pass
+        return api_response(
+            success=False,
+            message="Failed to link principal to department",
+            status=500,
+            error_type="SERVER_ERROR",
+        )
 
     return api_response(
         message="Principal linked to department successfully",

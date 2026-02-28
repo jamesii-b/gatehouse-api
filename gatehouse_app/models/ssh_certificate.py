@@ -1,6 +1,6 @@
 """SSH Certificate model."""
 from enum import Enum
-from datetime import datetime
+from datetime import datetime, timezone
 from gatehouse_app.extensions import db
 from gatehouse_app.models.base import BaseModel
 from gatehouse_app.models.ca import CertType
@@ -137,8 +137,10 @@ class SSHCertificate(BaseModel):
         if self.revoked or self.status == CertificateStatus.REVOKED:
             return False
         
-        now = datetime.utcnow()
-        return self.valid_after <= now <= self.valid_before
+        now = datetime.now(timezone.utc)
+        valid_after = self.valid_after.replace(tzinfo=timezone.utc) if self.valid_after.tzinfo is None else self.valid_after
+        valid_before = self.valid_before.replace(tzinfo=timezone.utc) if self.valid_before.tzinfo is None else self.valid_before
+        return valid_after <= now <= valid_before
 
     def is_expired(self):
         """Check if certificate has expired.
@@ -146,7 +148,9 @@ class SSHCertificate(BaseModel):
         Returns:
             True if current time is past valid_before
         """
-        return datetime.utcnow() > self.valid_before
+        now = datetime.now(timezone.utc)
+        valid_before = self.valid_before.replace(tzinfo=timezone.utc) if self.valid_before.tzinfo is None else self.valid_before
+        return now > valid_before
 
     def days_until_expiry(self):
         """Get number of days until certificate expires.
@@ -154,7 +158,9 @@ class SSHCertificate(BaseModel):
         Returns:
             Number of days remaining (negative if already expired)
         """
-        delta = self.valid_before - datetime.utcnow()
+        now = datetime.now(timezone.utc)
+        valid_before = self.valid_before.replace(tzinfo=timezone.utc) if self.valid_before.tzinfo is None else self.valid_before
+        delta = valid_before - now
         return delta.days + (1 if delta.seconds > 0 else 0)
 
     def revoke(self, reason=None):

@@ -1,5 +1,5 @@
 """Organization endpoints."""
-from flask import g, request
+from flask import g, request, current_app
 from marshmallow import ValidationError
 from gatehouse_app.api.v1 import api_v1_bp
 from gatehouse_app.utils.response import api_response
@@ -13,6 +13,7 @@ from gatehouse_app.schemas.organization_schema import (
 from gatehouse_app.services.organization_service import OrganizationService
 from gatehouse_app.services.user_service import UserService
 from gatehouse_app.utils.constants import OrganizationRole
+from gatehouse_app.extensions import db
 @api_v1_bp.route("/organizations", methods=["POST"])
 @login_required
 @full_access_required
@@ -930,3 +931,377 @@ def get_my_audit_logs():
         },
         message="Activity retrieved",
     )
+
+
+
+@api_v1_bp.route("/organizations/<org_id>/roles", methods=["GET"])
+@login_required
+def list_organization_roles(org_id):
+    """List the available roles for an organization.
+
+    Returns the canonical set of OrganizationRole values together with every
+    current member assigned to each role.
+
+    Returns:
+        200: roles list with member counts
+        401: Not authenticated
+        404: Organization not found
+    """
+    from gatehouse_app.models.organization import Organization
+    from gatehouse_app.models.organization_member import OrganizationMember
+
+    org = Organization.query.filter_by(id=org_id, deleted_at=None).first()
+    if not org:
+        return api_response(success=False, message="Organization not found", status=404, error_type="NOT_FOUND")
+
+    # Load all active members grouped by role
+    members = OrganizationMember.query.filter_by(organization_id=org_id, deleted_at=None).all()
+    by_role: dict = {r.value: [] for r in OrganizationRole}
+    for m in members:
+        role_key = m.role.value if hasattr(m.role, "value") else str(m.role)
+        if role_key in by_role:
+            by_role[role_key].append({
+                "user_id": m.user_id,
+                "email": m.user.email if m.user else None,
+                "full_name": m.user.full_name if m.user else None,
+                "joined_at": m.created_at.isoformat() if m.created_at else None,
+            })
+
+    roles = [
+        {
+            "role": r.value,
+            "member_count": len(by_role[r.value]),
+            "members": by_role[r.value],
+        }
+        for r in OrganizationRole
+    ]
+    return api_response(data={"roles": roles, "organization_id": org_id}, message="Roles retrieved")
+
+
+@api_v1_bp.route("/organizations/<org_id>/roles/<role_name>/members", methods=["POST"])
+@login_required
+@require_admin
+def assign_role_to_member(org_id, role_name):
+    """Assign a role to a user in the organization (admin/owner only).
+
+    This is a convenience endpoint equivalent to PATCH
+    /organizations/<org_id>/members/<user_id>/role but driven by role name.
+
+    Request body:
+        user_id – UUID of the member to assign
+
+    Returns:
+        200: Role assigned
+        400: Invalid role / missing user_id
+        403: Not an admin/owner
+        404: Org or member not found
+    """
+    from gatehouse_app.models.organization_member import OrganizationMember
+    from gatehouse_app.extensions import db
+
+    try:
+        new_role = OrganizationRole(role_name.lower())
+    except ValueError:
+        valid = [r.value for r in OrganizationRole]
+        return api_response(success=False, message=f"Invalid role. Must be one of: {valid}", status=400, error_type="VALIDATION_ERROR")
+
+    data = request.get_json() or {}
+    target_user_id = data.get("user_id")
+    if not target_user_id:
+        return api_response(success=False, message="user_id is required", status=400, error_type="VALIDATION_ERROR")
+
+    membership = OrganizationMember.query.filter_by(
+        organization_id=org_id, user_id=target_user_id, deleted_at=None
+    ).first()
+    if not membership:
+        return api_response(success=False, message="Member not found in this organization", status=404, error_type="NOT_FOUND")
+
+    membership.role = new_role
+    db.session.commit()
+    return api_response(
+        data={"user_id": target_user_id, "role": new_role.value},
+        message=f"Role updated to {new_role.value}",
+    )
+
+
+@api_v1_bp.route("/organizations/<org_id>/roles/<role_name>/members/<user_id>", methods=["DELETE"])
+@login_required
+@require_admin
+def remove_role_from_member(org_id, role_name, user_id):
+    """Demote a member to GUEST (effectively removing a named role).
+
+    Removing a role downgrades the member to GUEST rather than removing them
+    from the organization entirely.  Use the existing DELETE
+    /organizations/<org_id>/members/<user_id> endpoint to fully remove.
+
+    Returns:
+        200: Role removed (member demoted to GUEST)
+        400: Invalid role name
+        403: Not an admin/owner
+        404: Org or member not found
+    """
+    from gatehouse_app.models.organization_member import OrganizationMember
+    from gatehouse_app.extensions import db
+
+    try:
+        OrganizationRole(role_name.lower())  # validate the name
+    except ValueError:
+        valid = [r.value for r in OrganizationRole]
+        return api_response(success=False, message=f"Invalid role. Must be one of: {valid}", status=400, error_type="VALIDATION_ERROR")
+
+    membership = OrganizationMember.query.filter_by(
+        organization_id=org_id, user_id=user_id, deleted_at=None
+    ).first()
+    if not membership:
+        return api_response(success=False, message="Member not found in this organization", status=404, error_type="NOT_FOUND")
+
+    membership.role = OrganizationRole.GUEST
+    db.session.commit()
+    return api_response(
+        data={"user_id": user_id, "role": OrganizationRole.GUEST.value},
+        message="Role removed; member demoted to GUEST",
+    )
+
+
+@api_v1_bp.route("/organizations/<org_id>/cas", methods=["GET"])
+@login_required
+@require_admin
+def list_org_cas(org_id):
+    """List all Certificate Authorities for an organization.
+
+    Returns:
+        200: List of CAs (private_key excluded)
+        403: Not admin/owner
+        404: Org not found
+    """
+    from gatehouse_app.models.ca import CA
+    from gatehouse_app.models.organization import Organization
+
+    org = Organization.query.filter_by(id=org_id, deleted_at=None).first()
+    if not org:
+        return api_response(success=False, message="Organization not found", status=404, error_type="NOT_FOUND")
+
+    cas = CA.query.filter_by(organization_id=org_id, deleted_at=None).all()
+    return api_response(
+        data={"cas": [ca.to_dict() for ca in cas], "count": len(cas)},
+        message="CAs retrieved",
+    )
+
+
+@api_v1_bp.route("/organizations/<org_id>/cas/<ca_id>", methods=["PATCH"])
+@login_required
+@require_admin
+def update_org_ca(org_id, ca_id):
+    """Update CA configuration (validity hours).
+
+    Request body:
+        default_cert_validity_hours: Default validity in hours (optional)
+        max_cert_validity_hours: Maximum validity in hours (optional)
+
+    Returns:
+        200: CA updated successfully
+        400: Validation error
+        403: Not admin/owner
+        404: Org or CA not found
+    """
+    from gatehouse_app.models.ca import CA
+    from gatehouse_app.models.organization import Organization
+    from marshmallow import Schema, fields, validate, ValidationError
+
+    org = Organization.query.filter_by(id=org_id, deleted_at=None).first()
+    if not org:
+        return api_response(success=False, message="Organization not found", status=404, error_type="NOT_FOUND")
+
+    ca = CA.query.filter_by(id=ca_id, organization_id=org_id, deleted_at=None).first()
+    if not ca:
+        return api_response(success=False, message="CA not found", status=404, error_type="NOT_FOUND")
+
+    try:
+        class CAUpdateSchema(Schema):
+            default_cert_validity_hours = fields.Int(
+                validate=validate.Range(min=1),
+                required=False
+            )
+            max_cert_validity_hours = fields.Int(
+                validate=validate.Range(min=1),
+                required=False
+            )
+
+        schema = CAUpdateSchema()
+        data = schema.load(request.json or {})
+
+        # Validate that max >= default if both are provided
+        default_hours = data.get('default_cert_validity_hours', ca.default_cert_validity_hours)
+        max_hours = data.get('max_cert_validity_hours', ca.max_cert_validity_hours)
+
+        if default_hours > max_hours:
+            return api_response(
+                success=False,
+                message="Default validity must be less than or equal to maximum validity",
+                status=400,
+                error_type="VALIDATION_ERROR",
+            )
+
+        # Update fields
+        if 'default_cert_validity_hours' in data:
+            ca.default_cert_validity_hours = data['default_cert_validity_hours']
+        if 'max_cert_validity_hours' in data:
+            ca.max_cert_validity_hours = data['max_cert_validity_hours']
+
+        db.session.commit()
+
+        return api_response(
+            data={"ca": ca.to_dict()},
+            message="CA updated successfully",
+        )
+
+    except ValidationError as e:
+        return api_response(
+            success=False,
+            message="Validation failed",
+            status=400,
+            error_type="VALIDATION_ERROR",
+            error_details=e.messages,
+        )
+    except Exception as e:
+        db.session.rollback()
+        return api_response(
+            success=False,
+            message="Failed to update CA",
+            status=500,
+            error_type="SERVER_ERROR",
+        )
+
+
+@api_v1_bp.route("/organizations/<org_id>/cas", methods=["POST"])
+@login_required
+@require_admin
+def create_org_ca(org_id):
+    """Create a new Certificate Authority for an organization.
+
+    Request body:
+        name: CA display name (required)
+        description: Optional description
+        key_type: "ed25519" (default), "rsa", or "ecdsa"
+        default_cert_validity_hours: Default cert validity in hours (optional)
+        max_cert_validity_hours: Max cert validity in hours (optional)
+
+    Returns:
+        201: CA created successfully
+        400: Validation error or name already taken
+        403: Not admin/owner
+        404: Org not found
+    """
+    from gatehouse_app.models.ca import CA, KeyType
+    from gatehouse_app.models.organization import Organization
+    from gatehouse_app.utils.crypto import compute_ssh_fingerprint
+    from marshmallow import Schema, fields as ma_fields, validate, ValidationError as MaValidationError
+    from sshkey_tools.keys import Ed25519PrivateKey, RsaPrivateKey, EcdsaPrivateKey
+
+    org = Organization.query.filter_by(id=org_id, deleted_at=None).first()
+    if not org:
+        return api_response(success=False, message="Organization not found", status=404, error_type="NOT_FOUND")
+
+    class CreateCASchema(Schema):
+        name = ma_fields.Str(required=True, validate=validate.Length(min=1, max=255))
+        description = ma_fields.Str(load_default=None, allow_none=True)
+        ca_type = ma_fields.Str(load_default="user", validate=validate.OneOf(["user", "host"]))
+        key_type = ma_fields.Str(load_default="ed25519", validate=validate.OneOf(["ed25519", "rsa", "ecdsa"]))
+        default_cert_validity_hours = ma_fields.Int(load_default=8, validate=validate.Range(min=1))
+        max_cert_validity_hours = ma_fields.Int(load_default=720, validate=validate.Range(min=1))
+
+    try:
+        schema = CreateCASchema()
+        data = schema.load(request.get_json() or {})
+
+        # Check name uniqueness within org
+        existing = CA.query.filter_by(
+            organization_id=org_id, name=data["name"], deleted_at=None
+        ).first()
+        if existing:
+            return api_response(
+                success=False,
+                message="A CA with that name already exists in this organization",
+                status=400,
+                error_type="DUPLICATE_NAME",
+            )
+
+        # Enforce one CA per type per org
+        from gatehouse_app.models.ca import CaType
+        ca_type_val = data["ca_type"]
+        existing_type = CA.query.filter_by(
+            organization_id=org_id, deleted_at=None
+        ).filter(CA.ca_type == CaType(ca_type_val)).first()
+        if existing_type:
+            type_label = "User" if ca_type_val == "user" else "Host"
+            return api_response(
+                success=False,
+                message=f"A {type_label} CA already exists for this organization. "
+                        f"You can only have one {type_label} CA per organization.",
+                status=400,
+                error_type="DUPLICATE_CA_TYPE",
+            )
+
+        # Validate cross-field
+        if data["default_cert_validity_hours"] > data["max_cert_validity_hours"]:
+            return api_response(
+                success=False,
+                message="Default validity must be less than or equal to maximum validity",
+                status=400,
+                error_type="VALIDATION_ERROR",
+            )
+
+        # Generate key pair
+        key_type = data["key_type"]
+        if key_type == "ed25519":
+            private_key_obj = Ed25519PrivateKey.generate()
+        elif key_type == "rsa":
+            private_key_obj = RsaPrivateKey.generate(4096)
+        else:  # ecdsa
+            private_key_obj = EcdsaPrivateKey.generate()
+
+        private_key_pem = private_key_obj.to_string()
+        public_key_str = private_key_obj.public_key.to_string()
+        fingerprint = compute_ssh_fingerprint(public_key_str)
+
+        ca = CA(
+            organization_id=org_id,
+            name=data["name"],
+            description=data["description"],
+            ca_type=CaType(ca_type_val),
+            key_type=KeyType(key_type),
+            private_key=private_key_pem,
+            public_key=public_key_str,
+            fingerprint=fingerprint,
+            default_cert_validity_hours=data["default_cert_validity_hours"],
+            max_cert_validity_hours=data["max_cert_validity_hours"],
+            is_active=True,
+        )
+        db.session.add(ca)
+        db.session.commit()
+
+        return api_response(
+            data={"ca": ca.to_dict()},
+            message="CA created successfully",
+            status=201,
+        )
+
+    except MaValidationError as e:
+        return api_response(
+            success=False,
+            message="Validation failed",
+            status=400,
+            error_type="VALIDATION_ERROR",
+            error_details=e.messages,
+        )
+    except Exception as e:
+        db.session.rollback()
+        current_app.logger.exception("Failed to create CA")
+        return api_response(
+            success=False,
+            message="Failed to create CA",
+            status=500,
+            error_type="SERVER_ERROR",
+        )
+
+

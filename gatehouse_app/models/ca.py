@@ -20,6 +20,13 @@ class CertType(str, Enum):
     HOST = "host"
 
 
+class CaType(str, Enum):
+    """CA signing type — whether this CA signs user or host certificates."""
+
+    USER = "user"
+    HOST = "host"
+
+
 class CA(BaseModel):
     """Certificate Authority (CA) model for SSH certificate signing.
     
@@ -40,7 +47,14 @@ class CA(BaseModel):
     # CA name and description
     name = db.Column(db.String(255), nullable=False)
     description = db.Column(db.Text, nullable=True)
-    
+
+    # CA signing type: 'user' signs user certificates, 'host' signs host certificates
+    ca_type = db.Column(
+        db.Enum(CaType, values_callable=lambda x: [e.value for e in x]),
+        default=CaType.USER,
+        nullable=False,
+    )
+
     # Key type (ED25519, RSA, ECDSA)
     key_type = db.Column(
         db.Enum(KeyType, values_callable=lambda x: [e.value for e in x]),
@@ -88,6 +102,11 @@ class CA(BaseModel):
     organization = db.relationship("Organization", back_populates="cas")
     certificates = db.relationship(
         "SSHCertificate",
+        back_populates="ca",
+        cascade="all, delete-orphan",
+    )
+    permissions = db.relationship(
+        "CAPermission",
         back_populates="ca",
         cascade="all, delete-orphan",
     )
@@ -153,3 +172,49 @@ class CA(BaseModel):
         self.rotated_at = datetime.utcnow()
         self.rotation_reason = reason
         self.save()
+
+
+class CAPermission(BaseModel):
+    """Per-user CA permission model.
+
+    Controls which users are allowed to sign certificates against a specific CA.
+    When a CA has any permission rows the signing endpoint enforces the list;
+    CAs with no rows are open to all org members (backwards-compatible default).
+
+    Permission values:
+        sign  – user may request certificate signing
+        admin – user may sign AND manage the CA (rotate keys, delete, etc.)
+    """
+
+    __tablename__ = "ca_permissions"
+
+    ca_id = db.Column(
+        db.String(36),
+        db.ForeignKey("cas.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    user_id = db.Column(
+        db.String(36),
+        db.ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    permission = db.Column(db.String(50), nullable=False, default="sign")
+
+    # Relationships
+    ca = db.relationship("CA", back_populates="permissions")
+    user = db.relationship("User", back_populates="ca_permissions")
+
+    __table_args__ = (
+        db.UniqueConstraint("ca_id", "user_id", name="uix_ca_permission"),
+    )
+
+    def __repr__(self):
+        return f"<CAPermission ca_id={self.ca_id} user_id={self.user_id} permission={self.permission}>"
+
+    def to_dict(self, exclude=None):
+        data = super().to_dict(exclude=exclude or [])
+        data["permission"] = self.permission
+        return data

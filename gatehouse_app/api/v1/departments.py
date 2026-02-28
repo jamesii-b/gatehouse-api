@@ -520,3 +520,43 @@ def remove_department_member(org_id, dept_id, user_id):
     return api_response(
         message="Member removed successfully",
     )
+
+
+@api_v1_bp.route("/organizations/<org_id>/departments/<dept_id>/principals", methods=["GET"])
+@login_required
+@full_access_required
+def get_department_principals(org_id, dept_id):
+    """Get all principals linked to a department."""
+    org = OrganizationService.get_organization_by_id(org_id)
+
+    if not org.is_member(g.current_user.id):
+        return api_response(
+            success=False,
+            message="You are not a member of this organization",
+            status=403,
+            error_type="AUTHORIZATION_ERROR",
+        )
+
+    dept = Department.query.filter_by(
+        id=dept_id,
+        organization_id=org_id,
+        deleted_at=None
+    ).first()
+
+    if not dept:
+        return api_response(
+            success=False,
+            message="Department not found",
+            status=404,
+            error_type="NOT_FOUND",
+        )
+
+    principals = dept.get_principals(active_only=True)
+
+    return api_response(
+        data={
+            "principals": [p.to_dict() for p in principals],
+            "count": len(principals),
+        },
+        message="Principals retrieved successfully",
+    )

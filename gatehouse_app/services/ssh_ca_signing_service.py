@@ -5,7 +5,7 @@ This service is a Gatehouse-integrated version of the secuird/ssh_ca.py logic.
 """
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Dict, Any, Optional
 
 from sshkey_tools.cert import SSHCertificate, CertificateFields
@@ -240,7 +240,7 @@ class SSHCASigningService:
             )
             
             # Set validity period
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             expiry_hours = signing_request.expiry_hours or self.config.get_int('cert_validity_hours')
             valid_before = now + timedelta(hours=expiry_hours)
             

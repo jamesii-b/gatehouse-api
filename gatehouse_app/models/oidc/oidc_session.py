@@ -1,5 +1,7 @@
 """OIDC Session model for OIDC session tracking."""
-from datetime import datetime, timezone
+import hashlib
+import base64
+from datetime import datetime, timedelta, timezone
 from gatehouse_app.extensions import db
 from gatehouse_app.models.base import BaseModel
 
@@ -7,8 +9,8 @@ from gatehouse_app.models.base import BaseModel
 class OIDCSession(BaseModel):
     """OIDC Session model for tracking OIDC authentication sessions.
 
-    This model tracks the state during the OIDC authentication flow,
-    including PKCE parameters and nonce validation.
+    Tracks the state during the OIDC authorization flow, including PKCE
+    parameters and nonce validation.
     """
 
     __tablename__ = "oidc_sessions"
@@ -25,11 +27,11 @@ class OIDCSession(BaseModel):
 
     # State management
     state = db.Column(db.String(255), nullable=False, index=True)
-    nonce = db.Column(db.String(255), nullable=True)  # For OIDC ID Token validation
+    nonce = db.Column(db.String(255), nullable=True)
 
     # Authorization request parameters
     redirect_uri = db.Column(db.String(512), nullable=False)
-    scope = db.Column(db.JSON, nullable=True)  # Requested scopes
+    scope = db.Column(db.JSON, nullable=True)
 
     # PKCE parameters
     code_challenge = db.Column(db.String(255), nullable=True)
@@ -45,50 +47,52 @@ class OIDCSession(BaseModel):
 
     def __repr__(self):
         """String representation of OIDCSession."""
-        return f"<OIDCSession user_id={self.user_id} client_id={self.client_id} state={self.state[:8]}...>"
+        return (
+            f"<OIDCSession user_id={self.user_id} "
+            f"client_id={self.client_id} state={self.state[:8]}...>"
+        )
 
-    def is_expired(self):
+    def is_expired(self) -> bool:
         """Check if the OIDC session has expired."""
-        return datetime.now(timezone.utc) > self.expires_at
+        expires_at = self.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) > expires_at
 
-    def is_authenticated(self):
+    def is_authenticated(self) -> bool:
         """Check if the user has been authenticated in this session."""
         return self.authenticated_at is not None
 
-    def mark_authenticated(self):
+    def mark_authenticated(self) -> None:
         """Mark the session as authenticated."""
         self.authenticated_at = datetime.now(timezone.utc)
         db.session.commit()
 
-    def validate_nonce(self, expected_nonce):
+    def validate_nonce(self, expected_nonce: str) -> bool:
         """Validate the nonce matches the expected value.
 
         Args:
             expected_nonce: The expected nonce value
 
         Returns:
-            bool: True if nonce matches
+            True if nonce matches
         """
         return self.nonce == expected_nonce
 
-    def validate_code_challenge(self, code_verifier):
+    def validate_code_challenge(self, code_verifier: str) -> bool:
         """Validate the code verifier against the stored code challenge.
 
         Args:
             code_verifier: The PKCE code verifier
 
         Returns:
-            bool: True if code challenge is valid
+            True if the challenge is satisfied
         """
         if not self.code_challenge:
             return False
 
         if self.code_challenge_method == "S256":
-            import hashlib
-            import base64
-            # SHA256 hash of code_verifier
             digest = hashlib.sha256(code_verifier.encode()).digest()
-            # Base64 URL encode without padding
             expected = base64.urlsafe_b64encode(digest).decode().rstrip("=")
             return self.code_challenge == expected
         elif self.code_challenge_method == "plain":
@@ -97,9 +101,18 @@ class OIDCSession(BaseModel):
         return False
 
     @classmethod
-    def create_session(cls, user_id, client_id, state, redirect_uri, scope=None,
-                       nonce=None, code_challenge=None, code_challenge_method=None,
-                       lifetime_seconds=600):
+    def create_session(
+        cls,
+        user_id: str,
+        client_id: str,
+        state: str,
+        redirect_uri: str,
+        scope=None,
+        nonce: str = None,
+        code_challenge: str = None,
+        code_challenge_method: str = None,
+        lifetime_seconds: int = 600,
+    ) -> "OIDCSession":
         """Create a new OIDC session.
 
         Args:
@@ -116,7 +129,6 @@ class OIDCSession(BaseModel):
         Returns:
             OIDCSession instance
         """
-        from datetime import timedelta
         session = cls(
             user_id=user_id,
             client_id=client_id,
@@ -133,7 +145,7 @@ class OIDCSession(BaseModel):
         return session
 
     @classmethod
-    def get_by_state(cls, state):
+    def get_by_state(cls, state: str) -> "OIDCSession | None":
         """Get a session by state parameter.
 
         Args:
@@ -147,16 +159,3 @@ class OIDCSession(BaseModel):
     def to_dict(self, exclude=None):
         """Convert to dictionary."""
         return super().to_dict(exclude=exclude)
-
-
-# Add relationship back to User model
-from gatehouse_app.models.user import User
-User.oidc_sessions = db.relationship(
-    "OIDCSession", back_populates="user", cascade="all, delete-orphan"
-)
-
-# Add relationship back to OIDCClient model
-from gatehouse_app.models.oidc_client import OIDCClient
-OIDCClient.oidc_sessions = db.relationship(
-    "OIDCSession", back_populates="client", cascade="all, delete-orphan"
-)

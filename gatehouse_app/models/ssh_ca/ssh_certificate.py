@@ -1,26 +1,26 @@
-"""SSH Certificate model."""
+"""SSH Certificate model — signed SSH user/host certificates."""
 from enum import Enum
 from datetime import datetime, timezone
 from gatehouse_app.extensions import db
 from gatehouse_app.models.base import BaseModel
-from gatehouse_app.models.ca import CertType
+from gatehouse_app.models.ssh_ca.ca import CertType
 
 
 class CertificateStatus(str, Enum):
     """SSH certificate lifecycle status."""
-    
-    REQUESTED = "requested"          # Waiting for signing
-    ISSUED = "issued"                # Signed and valid
-    REVOKED = "revoked"              # Manually revoked
-    EXPIRED = "expired"              # Validity period ended
-    SUPERSEDED = "superseded"        # Replaced by newer cert
+
+    REQUESTED = "requested"    # Waiting for signing
+    ISSUED = "issued"          # Signed and valid
+    REVOKED = "revoked"        # Manually revoked
+    EXPIRED = "expired"        # Validity period ended
+    SUPERSEDED = "superseded"  # Replaced by newer certificate
 
 
 class SSHCertificate(BaseModel):
     """SSH Certificate model representing a signed SSH user/host certificate.
-    
+
     Certificates are issued by a CA and associated with an SSH public key.
-    They include principals (access levels), validity periods, and other
+    They include principals (access levels), validity periods, and standard
     OpenSSH certificate metadata.
     """
 
@@ -45,10 +45,10 @@ class SSHCertificate(BaseModel):
         nullable=False,
         index=True,
     )
-    
-    # Certificate content (full signed certificate in OpenSSH format)
+
+    # Certificate content — full signed certificate in OpenSSH format
     certificate = db.Column(db.Text, nullable=False)
-    
+
     # Certificate metadata
     serial = db.Column(db.String(255), nullable=False, unique=True, index=True)
     key_id = db.Column(db.String(255), nullable=False)  # Usually user email
@@ -57,19 +57,19 @@ class SSHCertificate(BaseModel):
         default=CertType.USER,
         nullable=False,
     )
-    
-    # Principals (JSON list) - e.g., ["prod-servers", "dev-servers"]
+
+    # Principals — JSON list, e.g., ["prod-servers", "dev-servers"]
     principals = db.Column(db.JSON, nullable=False, default=list)
-    
+
     # Validity period
     valid_after = db.Column(db.DateTime, nullable=False)
     valid_before = db.Column(db.DateTime, nullable=False)
-    
+
     # Revocation status
     revoked = db.Column(db.Boolean, default=False, nullable=False, index=True)
     revoked_at = db.Column(db.DateTime, nullable=True)
     revoke_reason = db.Column(db.String(255), nullable=True)
-    
+
     # Status tracking
     status = db.Column(
         db.Enum(CertificateStatus, values_callable=lambda x: [e.value for e in x]),
@@ -77,19 +77,17 @@ class SSHCertificate(BaseModel):
         nullable=False,
         index=True,
     )
-    
+
     # Request metadata
     request_ip = db.Column(db.String(45), nullable=True)
     request_user_agent = db.Column(db.String(512), nullable=True)
-    
-    # Critical options (JSON) - OpenSSH critical options
-    # See: https://man.openbsd.org/ssh-cert
+
+    # Critical options — OpenSSH critical options (JSON)
     critical_options = db.Column(db.JSON, nullable=True, default=dict)
-    
-    # Extensions (JSON) - OpenSSH extensions
-    # Common ones: permit-X11-forwarding, permit-agent-forwarding, permit-pty, etc.
+
+    # Extensions — OpenSSH extensions (JSON)
     extensions = db.Column(db.JSON, nullable=True, default=dict)
-    
+
     # Relationships
     ca = db.relationship("CA", back_populates="certificates")
     user = db.relationship("User", back_populates="ssh_certificates")
@@ -115,67 +113,64 @@ class SSHCertificate(BaseModel):
         return f"<SSHCertificate serial={self.serial[:16]}... user_id={self.user_id}>"
 
     def to_dict(self, exclude=None):
-        """Convert certificate to dictionary."""
+        """Convert certificate to dictionary.
+
+        The raw ``certificate`` blob is excluded by default (it is large and
+        callers can request it explicitly by removing it from the exclude list).
+        """
         exclude = exclude or []
-        # Optionally exclude the certificate content (it's large)
         if "certificate" not in exclude:
             exclude.append("certificate")
         data = super().to_dict(exclude=exclude)
-        
-        # Add computed fields
         data["is_valid"] = self.is_valid()
         data["days_until_expiry"] = self.days_until_expiry()
-        
         return data
 
-    def is_valid(self):
+    def _aware(self, dt: datetime) -> datetime:
+        """Return a timezone-aware UTC datetime."""
+        return dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt
+
+    def is_valid(self) -> bool:
         """Check if certificate is currently valid.
-        
+
         Returns:
             True if certificate is issued, not revoked, and within validity period
         """
         if self.revoked or self.status == CertificateStatus.REVOKED:
             return False
-        
         now = datetime.now(timezone.utc)
-        valid_after = self.valid_after.replace(tzinfo=timezone.utc) if self.valid_after.tzinfo is None else self.valid_after
-        valid_before = self.valid_before.replace(tzinfo=timezone.utc) if self.valid_before.tzinfo is None else self.valid_before
-        return valid_after <= now <= valid_before
+        return self._aware(self.valid_after) <= now <= self._aware(self.valid_before)
 
-    def is_expired(self):
+    def is_expired(self) -> bool:
         """Check if certificate has expired.
-        
+
         Returns:
             True if current time is past valid_before
         """
-        now = datetime.now(timezone.utc)
-        valid_before = self.valid_before.replace(tzinfo=timezone.utc) if self.valid_before.tzinfo is None else self.valid_before
-        return now > valid_before
+        return datetime.now(timezone.utc) > self._aware(self.valid_before)
 
-    def days_until_expiry(self):
+    def days_until_expiry(self) -> int:
         """Get number of days until certificate expires.
-        
+
         Returns:
             Number of days remaining (negative if already expired)
         """
-        now = datetime.now(timezone.utc)
-        valid_before = self.valid_before.replace(tzinfo=timezone.utc) if self.valid_before.tzinfo is None else self.valid_before
-        delta = valid_before - now
+        delta = self._aware(self.valid_before) - datetime.now(timezone.utc)
         return delta.days + (1 if delta.seconds > 0 else 0)
 
-    def revoke(self, reason=None):
+    def revoke(self, reason: str = None) -> None:
         """Revoke this certificate.
-        
+
         Args:
             reason: Optional reason for revocation
         """
         self.revoked = True
-        self.revoked_at = datetime.utcnow()
+        self.revoked_at = datetime.now(timezone.utc)    # Bug fix: was datetime.utcnow()
         self.revoke_reason = reason
         self.status = CertificateStatus.REVOKED
         self.save()
 
-    def mark_expired(self):
+    def mark_expired(self) -> None:
         """Mark certificate as expired when validity period ends."""
         self.status = CertificateStatus.EXPIRED
         self.save()

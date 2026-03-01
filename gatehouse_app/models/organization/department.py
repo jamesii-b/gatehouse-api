@@ -1,14 +1,15 @@
+"""Department, DepartmentMembership, and DepartmentPrincipal models."""
 from gatehouse_app.extensions import db
 from gatehouse_app.models.base import BaseModel
 
 
 class Department(BaseModel):
     """Department model representing an organizational unit for SSH access control.
-    
+
     Departments are used to group users and assign SSH principals (access levels)
     to them. A user can be a member of multiple departments, and each department
     can have multiple principals assigned.
-    
+
     Example:
         - Department: "Engineering"
         - Members: user1@example.com, user2@example.com
@@ -39,12 +40,15 @@ class Department(BaseModel):
         back_populates="department",
         cascade="all, delete-orphan",
     )
+    cert_policy = db.relationship(
+        "DepartmentCertPolicy",
+        back_populates="department",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
-    # Unique constraint: department name per organization
     __table_args__ = (
-        db.UniqueConstraint(
-            "organization_id", "name", name="uix_org_dept_name"
-        ),
+        db.UniqueConstraint("organization_id", "name", name="uix_org_dept_name"),
     )
 
     def __repr__(self):
@@ -55,47 +59,46 @@ class Department(BaseModel):
         """Convert department to dictionary."""
         exclude = exclude or []
         data = super().to_dict(exclude=exclude)
-        
-        # Add member count
         data["member_count"] = len([m for m in self.memberships if m.deleted_at is None])
-        
-        # Add principal count
         data["principal_count"] = len([p for p in self.principal_links if p.deleted_at is None])
-        
         return data
 
-    def get_members(self, active_only=True):
+    def get_members(self, active_only: bool = True):
         """Get all members of this department.
-        
+
         Args:
             active_only: If True, exclude soft-deleted members
-            
+
         Returns:
             List of DepartmentMembership objects
         """
         if active_only:
             return [m for m in self.memberships if m.deleted_at is None]
-        return self.memberships
+        return list(self.memberships)
 
-    def get_principals(self, active_only=True):
+    def get_principals(self, active_only: bool = True):
         """Get all principals assigned to this department.
-        
+
         Args:
             active_only: If True, exclude soft-deleted principals
-            
+
         Returns:
             List of Principal objects via DepartmentPrincipal
         """
         if active_only:
-            return [p.principal for p in self.principal_links if p.deleted_at is None and p.principal.deleted_at is None]
+            return [
+                p.principal
+                for p in self.principal_links
+                if p.deleted_at is None and p.principal.deleted_at is None
+            ]
         return [p.principal for p in self.principal_links]
 
-    def is_member(self, user_id):
+    def is_member(self, user_id: str) -> bool:
         """Check if a user is a member of this department.
-        
+
         Args:
             user_id: ID of the user to check
-            
+
         Returns:
             True if user is an active member, False otherwise
         """
@@ -108,14 +111,14 @@ class Department(BaseModel):
             is not None
         )
 
-    def get_member_count(self):
+    def get_member_count(self) -> int:
         """Get the count of active members in this department."""
         return len(self.get_members(active_only=True))
 
 
 class DepartmentMembership(BaseModel):
     """Department membership model representing user membership in a department.
-    
+
     When a user is added to a department, they become eligible for SSH principals
     assigned to that department.
     """
@@ -139,24 +142,23 @@ class DepartmentMembership(BaseModel):
     user = db.relationship("User", back_populates="department_memberships")
     department = db.relationship("Department", back_populates="memberships")
 
-    # Unique constraint: user can only be member of a department once
     __table_args__ = (
-        db.UniqueConstraint(
-            "user_id", "department_id", name="uix_user_dept"
-        ),
+        db.UniqueConstraint("user_id", "department_id", name="uix_user_dept"),
     )
 
     def __repr__(self):
         """String representation of DepartmentMembership."""
-        return f"<DepartmentMembership user_id={self.user_id} dept_id={self.department_id}>"
+        return (
+            f"<DepartmentMembership user_id={self.user_id} dept_id={self.department_id}>"
+        )
 
 
 class DepartmentPrincipal(BaseModel):
     """Department principal assignment model.
-    
+
     Represents the assignment of principals to departments. All members of a
     department get access to its assigned principals (transitively).
-    
+
     Example:
         - Department: "Engineering"
         - Principal: "eng-prod-servers"
@@ -182,13 +184,13 @@ class DepartmentPrincipal(BaseModel):
     department = db.relationship("Department", back_populates="principal_links")
     principal = db.relationship("Principal", back_populates="department_links")
 
-    # Unique constraint: principal can only be assigned to a department once
     __table_args__ = (
-        db.UniqueConstraint(
-            "department_id", "principal_id", name="uix_dept_principal"
-        ),
+        db.UniqueConstraint("department_id", "principal_id", name="uix_dept_principal"),
     )
 
     def __repr__(self):
         """String representation of DepartmentPrincipal."""
-        return f"<DepartmentPrincipal dept_id={self.department_id} principal_id={self.principal_id}>"
+        return (
+            f"<DepartmentPrincipal dept_id={self.department_id} "
+            f"principal_id={self.principal_id}>"
+        )

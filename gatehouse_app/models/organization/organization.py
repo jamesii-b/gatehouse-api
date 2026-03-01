@@ -61,9 +61,9 @@ class Organization(BaseModel):
                 return member.user
         return None
 
-    def is_member(self, user_id):
+    def is_member(self, user_id: str) -> bool:
         """Check if a user is a member of the organization."""
-        from gatehouse_app.models.organization_member import OrganizationMember
+        from gatehouse_app.models.organization.organization_member import OrganizationMember
 
         return (
             OrganizationMember.query.filter_by(

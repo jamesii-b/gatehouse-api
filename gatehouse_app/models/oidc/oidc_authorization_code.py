@@ -1,14 +1,14 @@
-"""OIDC Authorization Code model for auth code flow."""
+"""OIDC Authorization Code model for the authorization code grant flow."""
 from datetime import datetime, timedelta, timezone
 from gatehouse_app.extensions import db
 from gatehouse_app.models.base import BaseModel
 
 
 class OIDCAuthCode(BaseModel):
-    """OIDC Authorization Code model for authorization code flow.
+    """OIDC Authorization Code model for the authorization code grant flow.
 
-    Authorization codes are single-use, short-lived codes used in the
-    authorization code grant flow. The code is hashed for security.
+    Authorization codes are single-use, short-lived codes. The code itself is
+    hashed before storage so that a database breach cannot replay codes.
     """
 
     __tablename__ = "oidc_authorization_codes"
@@ -26,9 +26,9 @@ class OIDCAuthCode(BaseModel):
 
     # Request parameters
     redirect_uri = db.Column(db.String(512), nullable=False)
-    scope = db.Column(db.JSON, nullable=True)  # Requested scopes
-    nonce = db.Column(db.String(255), nullable=True)  # For OIDC ID Token validation
-    code_verifier = db.Column(db.String(255), nullable=True)  # For PKCE
+    scope = db.Column(db.JSON, nullable=True)
+    nonce = db.Column(db.String(255), nullable=True)
+    code_verifier = db.Column(db.String(255), nullable=True)
 
     # Status tracking
     expires_at = db.Column(db.DateTime, nullable=False, index=True)
@@ -39,37 +39,48 @@ class OIDCAuthCode(BaseModel):
     ip_address = db.Column(db.String(45), nullable=True)
     user_agent = db.Column(db.Text, nullable=True)
 
-    # Relationships
+    # Relationships — back_populates declared on User and OIDCClient
     client = db.relationship("OIDCClient", back_populates="authorization_codes")
     user = db.relationship("User", back_populates="oidc_auth_codes")
 
     def __repr__(self):
         """String representation of OIDCAuthCode."""
-        return f"<OIDCAuthCode client_id={self.client_id} user_id={self.user_id} used={self.is_used}>"
+        return (
+            f"<OIDCAuthCode client_id={self.client_id} "
+            f"user_id={self.user_id} used={self.is_used}>"
+        )
 
-    def is_expired(self):
+    def is_expired(self) -> bool:
         """Check if the authorization code has expired."""
-        # Handle both timezone-aware and timezone-naive expires_at values
         expires_at = self.expires_at
         if expires_at.tzinfo is None:
-            # Make naive datetime timezone-aware (UTC)
             expires_at = expires_at.replace(tzinfo=timezone.utc)
         return datetime.now(timezone.utc) > expires_at
 
-    def is_valid(self):
+    def is_valid(self) -> bool:
         """Check if the authorization code is valid for use."""
         return not self.is_used and not self.is_expired() and self.deleted_at is None
 
-    def mark_as_used(self):
+    def mark_as_used(self) -> None:
         """Mark the authorization code as used."""
         self.is_used = True
         self.used_at = datetime.now(timezone.utc)
         db.session.commit()
 
     @classmethod
-    def create_code(cls, client_id, user_id, code_hash, redirect_uri, scope=None,
-                    nonce=None, code_verifier=None, ip_address=None, user_agent=None,
-                    lifetime_seconds=600):
+    def create_code(
+        cls,
+        client_id: str,
+        user_id: str,
+        code_hash: str,
+        redirect_uri: str,
+        scope=None,
+        nonce: str = None,
+        code_verifier: str = None,
+        ip_address: str = None,
+        user_agent: str = None,
+        lifetime_seconds: int = 600,
+    ) -> "OIDCAuthCode":
         """Create a new authorization code.
 
         Args:
@@ -79,7 +90,7 @@ class OIDCAuthCode(BaseModel):
             redirect_uri: The redirect URI
             scope: Requested scopes
             nonce: OIDC nonce
-            code_verifier: PKCE code verifier
+            code_verifier: PKCE code verifier (stored hashed server-side)
             ip_address: Client IP address
             user_agent: Client user agent
             lifetime_seconds: Code lifetime in seconds (default 10 minutes)
@@ -106,20 +117,7 @@ class OIDCAuthCode(BaseModel):
     def to_dict(self, exclude=None):
         """Convert to dictionary, excluding sensitive fields."""
         exclude = exclude or []
-        # Always exclude code hash
-        exclude.append("code_hash")
-        exclude.append("code_verifier")
+        for field in ("code_hash", "code_verifier"):
+            if field not in exclude:
+                exclude.append(field)
         return super().to_dict(exclude=exclude)
-
-
-# Add relationship back to User model
-from gatehouse_app.models.user import User
-User.oidc_auth_codes = db.relationship(
-    "OIDCAuthCode", back_populates="user", cascade="all, delete-orphan"
-)
-
-# Add relationship back to OIDCClient model
-from gatehouse_app.models.oidc_client import OIDCClient
-OIDCClient.authorization_codes = db.relationship(
-    "OIDCAuthCode", back_populates="client", cascade="all, delete-orphan"
-)

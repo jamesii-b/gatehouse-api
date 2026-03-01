@@ -39,15 +39,19 @@ class OrganizationSecurityPolicy(BaseModel):
 
     # Relationships
     organization = db.relationship(
-        "Organization", back_populates="security_policy", foreign_keys=[organization_id]
+        "Organization",
+        back_populates="security_policy",
+        foreign_keys=[organization_id],
     )
     updated_by_user = db.relationship("User", foreign_keys=[updated_by_user_id])
 
     def __repr__(self):
         """String representation of OrganizationSecurityPolicy."""
-        return f"<OrganizationSecurityPolicy org={self.organization_id} mode={self.mfa_policy_mode}>"
+        return (
+            f"<OrganizationSecurityPolicy "
+            f"org={self.organization_id} mode={self.mfa_policy_mode}>"
+        )
 
     def to_dict(self, exclude=None):
         """Convert to dictionary."""
-        exclude = exclude or []
-        return super().to_dict(exclude=exclude)
+        return super().to_dict(exclude=exclude or [])

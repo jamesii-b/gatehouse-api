@@ -1,5 +1,4 @@
 """OIDC Audit Log model for comprehensive OIDC event tracking."""
-from datetime import datetime
 from gatehouse_app.extensions import db
 from gatehouse_app.models.base import BaseModel
 
@@ -7,8 +6,7 @@ from gatehouse_app.models.base import BaseModel
 class OIDCAuditLog(BaseModel):
     """OIDC Audit Log model for comprehensive OIDC event tracking.
 
-    This model logs all OIDC-related events for security, compliance,
-    and debugging purposes.
+    Logs all OIDC-related events for security, compliance, and debugging.
     """
 
     __tablename__ = "oidc_audit_logs"
@@ -46,16 +44,29 @@ class OIDCAuditLog(BaseModel):
     def __repr__(self):
         """String representation of OIDCAuditLog."""
         status = "success" if self.success else "failed"
-        return f"<OIDCAuditLog event={self.event_type} status={status} client={self.client_id}>"
+        return (
+            f"<OIDCAuditLog event={self.event_type} "
+            f"status={status} client={self.client_id}>"
+        )
 
     @classmethod
-    def log_event(cls, event_type, client_id=None, user_id=None, success=True,
-                  error_code=None, error_description=None, ip_address=None,
-                  user_agent=None, request_id=None, event_metadata=None):
+    def log_event(
+        cls,
+        event_type: str,
+        client_id: str = None,
+        user_id: str = None,
+        success: bool = True,
+        error_code: str = None,
+        error_description: str = None,
+        ip_address: str = None,
+        user_agent: str = None,
+        request_id: str = None,
+        event_metadata: dict = None,
+    ) -> "OIDCAuditLog":
         """Log an OIDC event.
 
         Args:
-            event_type: Type of event (e.g., "authorization_request", "token_issue")
+            event_type: Type of event (e.g., "authorization_request")
             client_id: The OIDC client ID
             user_id: The user ID
             success: Whether the event was successful
@@ -86,9 +97,19 @@ class OIDCAuditLog(BaseModel):
         return log
 
     @classmethod
-    def log_authorization_request(cls, client_id, user_id, redirect_uri, scope,
-                                   ip_address=None, user_agent=None, request_id=None,
-                                   success=True, error_code=None, error_description=None):
+    def log_authorization_request(
+        cls,
+        client_id: str,
+        user_id: str,
+        redirect_uri: str,
+        scope,
+        ip_address: str = None,
+        user_agent: str = None,
+        request_id: str = None,
+        success: bool = True,
+        error_code: str = None,
+        error_description: str = None,
+    ) -> "OIDCAuditLog":
         """Log an authorization request event."""
         return cls.log_event(
             event_type="authorization_request",
@@ -100,15 +121,19 @@ class OIDCAuditLog(BaseModel):
             ip_address=ip_address,
             user_agent=user_agent,
             request_id=request_id,
-            event_metadata={
-                "redirect_uri": redirect_uri,
-                "scope": scope,
-            }
+            event_metadata={"redirect_uri": redirect_uri, "scope": scope},
         )
 
     @classmethod
-    def log_token_issue(cls, client_id, user_id, token_type,
-                        ip_address=None, user_agent=None, request_id=None):
+    def log_token_issue(
+        cls,
+        client_id: str,
+        user_id: str,
+        token_type: str,
+        ip_address: str = None,
+        user_agent: str = None,
+        request_id: str = None,
+    ) -> "OIDCAuditLog":
         """Log a token issuance event."""
         return cls.log_event(
             event_type="token_issue",
@@ -118,12 +143,20 @@ class OIDCAuditLog(BaseModel):
             ip_address=ip_address,
             user_agent=user_agent,
             request_id=request_id,
-            event_metadata={"token_type": token_type}
+            event_metadata={"token_type": token_type},
         )
 
     @classmethod
-    def log_token_revocation(cls, client_id, user_id, token_type, reason=None,
-                             ip_address=None, user_agent=None, request_id=None):
+    def log_token_revocation(
+        cls,
+        client_id: str,
+        user_id: str,
+        token_type: str,
+        reason: str = None,
+        ip_address: str = None,
+        user_agent: str = None,
+        request_id: str = None,
+    ) -> "OIDCAuditLog":
         """Log a token revocation event."""
         return cls.log_event(
             event_type="token_revocation",
@@ -133,15 +166,19 @@ class OIDCAuditLog(BaseModel):
             ip_address=ip_address,
             user_agent=user_agent,
             request_id=request_id,
-            event_metadata={
-                "token_type": token_type,
-                "reason": reason,
-            }
+            event_metadata={"token_type": token_type, "reason": reason},
         )
 
     @classmethod
-    def log_authentication_failure(cls, client_id, error_code, error_description,
-                                   ip_address=None, user_agent=None, request_id=None):
+    def log_authentication_failure(
+        cls,
+        client_id: str,
+        error_code: str,
+        error_description: str,
+        ip_address: str = None,
+        user_agent: str = None,
+        request_id: str = None,
+    ) -> "OIDCAuditLog":
         """Log an authentication failure event."""
         return cls.log_event(
             event_type="authentication_failure",
@@ -155,7 +192,7 @@ class OIDCAuditLog(BaseModel):
         )
 
     @classmethod
-    def get_events_for_user(cls, user_id, limit=100):
+    def get_events_for_user(cls, user_id: str, limit: int = 100) -> list:
         """Get audit events for a user.
 
         Args:
@@ -165,13 +202,15 @@ class OIDCAuditLog(BaseModel):
         Returns:
             List of OIDCAuditLog instances
         """
-        return cls.query.filter_by(user_id=user_id, deleted_at=None)\
-            .order_by(cls.created_at.desc())\
-            .limit(limit)\
+        return (
+            cls.query.filter_by(user_id=user_id, deleted_at=None)
+            .order_by(cls.created_at.desc())
+            .limit(limit)
             .all()
+        )
 
     @classmethod
-    def get_events_for_client(cls, client_id, limit=100):
+    def get_events_for_client(cls, client_id: str, limit: int = 100) -> list:
         """Get audit events for a client.
 
         Args:
@@ -181,14 +220,22 @@ class OIDCAuditLog(BaseModel):
         Returns:
             List of OIDCAuditLog instances
         """
-        return cls.query.filter_by(client_id=client_id, deleted_at=None)\
-            .order_by(cls.created_at.desc())\
-            .limit(limit)\
+        return (
+            cls.query.filter_by(client_id=client_id, deleted_at=None)
+            .order_by(cls.created_at.desc())
+            .limit(limit)
             .all()
+        )
 
     @classmethod
-    def get_failed_events(cls, client_id=None, user_id=None, start_date=None,
-                          end_date=None, limit=100):
+    def get_failed_events(
+        cls,
+        client_id: str = None,
+        user_id: str = None,
+        start_date=None,
+        end_date=None,
+        limit: int = 100,
+    ) -> list:
         """Get failed audit events.
 
         Args:
@@ -210,22 +257,8 @@ class OIDCAuditLog(BaseModel):
             query = query.filter(cls.created_at >= start_date)
         if end_date:
             query = query.filter(cls.created_at <= end_date)
-
         return query.order_by(cls.created_at.desc()).limit(limit).all()
 
     def to_dict(self, exclude=None):
         """Convert to dictionary."""
         return super().to_dict(exclude=exclude)
-
-
-# Add relationship back to User model
-from gatehouse_app.models.user import User
-User.oidc_audit_logs = db.relationship(
-    "OIDCAuditLog", back_populates="user", cascade="all, delete-orphan"
-)
-
-# Add relationship back to OIDCClient model
-from gatehouse_app.models.oidc_client import OIDCClient
-OIDCClient.audit_logs = db.relationship(
-    "OIDCAuditLog", back_populates="client", cascade="all, delete-orphan"
-)

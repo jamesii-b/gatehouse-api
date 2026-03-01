@@ -1,4 +1,4 @@
-"""MfaPolicyCompliance model."""
+"""MfaPolicyCompliance model — per-user per-organization MFA compliance tracking."""
 from gatehouse_app.extensions import db
 from gatehouse_app.models.base import BaseModel
 from gatehouse_app.utils.constants import MfaComplianceStatus
@@ -7,7 +7,8 @@ from gatehouse_app.utils.constants import MfaComplianceStatus
 class MfaPolicyCompliance(BaseModel):
     """MFA policy compliance tracking per user per organization.
 
-    Tracks each user's MFA compliance state separately for each organization membership.
+    Tracks each user's MFA compliance state separately for each organization
+    membership. One row per (user, org) pair.
     """
 
     __tablename__ = "mfa_policy_compliance"
@@ -25,13 +26,13 @@ class MfaPolicyCompliance(BaseModel):
         default=MfaComplianceStatus.NOT_APPLICABLE,
     )
 
-    # Snapshot of org policy at the time this record became active
+    # Snapshot of org policy version when this record became active
     policy_version = db.Column(db.Integer, nullable=False)
 
     # When policy started applying to this user
     applied_at = db.Column(db.DateTime, nullable=True)
 
-    # Final deadline for this user to comply (per user, not global)
+    # Final deadline for this user to comply
     deadline_at = db.Column(db.DateTime, nullable=True)
 
     # When they became compliant under this policy_version
@@ -45,9 +46,7 @@ class MfaPolicyCompliance(BaseModel):
     notification_count = db.Column(db.Integer, nullable=False, default=0)
 
     __table_args__ = (
-        db.UniqueConstraint(
-            "user_id", "organization_id", name="uix_user_org_compliance"
-        ),
+        db.UniqueConstraint("user_id", "organization_id", name="uix_user_org_compliance"),
     )
 
     # Relationships
@@ -58,9 +57,11 @@ class MfaPolicyCompliance(BaseModel):
 
     def __repr__(self):
         """String representation of MfaPolicyCompliance."""
-        return f"<MfaPolicyCompliance user={self.user_id} org={self.organization_id} status={self.status}>"
+        return (
+            f"<MfaPolicyCompliance user={self.user_id} "
+            f"org={self.organization_id} status={self.status}>"
+        )
 
     def to_dict(self, exclude=None):
         """Convert to dictionary."""
-        exclude = exclude or []
-        return super().to_dict(exclude=exclude)
+        return super().to_dict(exclude=exclude or [])

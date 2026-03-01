@@ -454,7 +454,7 @@ def admin_suspend_user(user_id):
     if not admin_in_shared_org:
         return api_response(success=False, message="Access denied", status=403, error_type="AUTHORIZATION_ERROR")
 
-    if target.status == UserStatus.SUSPENDED:
+    if target.status in (UserStatus.SUSPENDED, UserStatus.COMPLIANCE_SUSPENDED):
         return api_response(success=False, message="User is already suspended", status=409, error_type="CONFLICT")
 
     target.status = UserStatus.SUSPENDED
@@ -501,7 +501,7 @@ def admin_unsuspend_user(user_id):
     if not admin_in_shared_org:
         return api_response(success=False, message="Access denied", status=403, error_type="AUTHORIZATION_ERROR")
 
-    if target.status != UserStatus.SUSPENDED:
+    if target.status not in (UserStatus.SUSPENDED, UserStatus.COMPLIANCE_SUSPENDED):
         return api_response(success=False, message="User is not suspended", status=409, error_type="CONFLICT")
 
     target.status = UserStatus.ACTIVE

@@ -79,11 +79,46 @@ def register():
         # Create session
         user_session = AuthService.create_session(user)
 
+        # ── Post-registration hints ─────────────────────────────────────────
+        from gatehouse_app.models.organization.org_invite_token import OrgInviteToken
+        from gatehouse_app.models.user.user import User as _User
+        from datetime import datetime, timezone as _tz
+
+        now = datetime.now(_tz.utc)
+        pending_invites = OrgInviteToken.query.filter(
+            OrgInviteToken.email == user.email,
+            OrgInviteToken.accepted_at.is_(None),
+            OrgInviteToken.expires_at > now,
+            OrgInviteToken.deleted_at.is_(None),
+        ).all()
+
+        # Determine if this is the very first user ever registered on this
+        # instance (exactly 1 active user means it must be this one).
+        total_users = _User.query.filter(_User.deleted_at.is_(None)).count()
+        is_first_user = total_users == 1
+
+        expires_str = user_session.expires_at.isoformat()
+        if expires_str[-1] != "Z":
+            expires_str += "Z"
+
         return api_response(
             data={
                 "user": user.to_dict(),
                 "token": user_session.token,
-                "expires_at": user_session.expires_at.isoformat() + "Z" if user_session.expires_at.isoformat()[-1] != "Z" else user_session.expires_at.isoformat(),
+                "expires_at": expires_str,
+                "is_first_user": is_first_user,
+                "pending_invites": [
+                    {
+                        "token": inv.token,
+                        "organization": {
+                            "id": str(inv.organization_id),
+                            "name": inv.organization.name,
+                        },
+                        "role": inv.role,
+                        "expires_at": inv.expires_at.isoformat(),
+                    }
+                    for inv in pending_invites
+                ],
             },
             message="Registration successful",
             status=201,
@@ -209,6 +244,36 @@ def login():
         # Add requires_mfa_enrollment flag if compliance-only session
         if is_compliance_only:
             response_data["requires_mfa_enrollment"] = True
+
+        # ── Org-setup hint for org-less users ────────────────────────────────
+        # If the user has no organisation memberships, surface any pending
+        # invitations so the UI can redirect straight to /org-setup instead of
+        # showing an empty dashboard.
+        user_orgs = user.get_organizations()
+        if not user_orgs:
+            from gatehouse_app.models.organization.org_invite_token import OrgInviteToken
+            from datetime import datetime, timezone as _tz
+            _now = datetime.now(_tz.utc)
+            pending_invites = OrgInviteToken.query.filter(
+                OrgInviteToken.email == user.email,
+                OrgInviteToken.accepted_at.is_(None),
+                OrgInviteToken.expires_at > _now,
+                OrgInviteToken.deleted_at.is_(None),
+            ).all()
+            response_data["pending_invites"] = [
+                {
+                    "token": inv.token,
+                    "organization": {
+                        "id": str(inv.organization_id),
+                        "name": inv.organization.name,
+                    },
+                    "role": inv.role,
+                    "expires_at": inv.expires_at.isoformat(),
+                }
+                for inv in pending_invites
+            ]
+            # Flag so the UI knows to send this user through org-setup
+            response_data["requires_org_setup"] = True
 
         return api_response(
             data=response_data,

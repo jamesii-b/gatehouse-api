@@ -900,11 +900,19 @@ def handle_oauth_callback(provider: str):
 
         # Organization creation needed (new user via OAuth with no org)
         if result.get("requires_org_creation") and not cli_redirect_url:
+            import json as _json
+            session_data = result.get("session", {})
+            token = session_data.get("token", "")
+            expires_in = session_data.get("expires_in", 86400)
+            pending_invites = result.get("pending_invites", [])
             params = {
                 "requires_org_creation": "1",
                 "state": result["state"],
                 "provider": provider,
                 "flow": flow_type,
+                "token": token,
+                "expires_in": str(expires_in),
+                "pending_invites": _json.dumps(pending_invites),
             }
             if oidc_session_id:
                 params["oidc_session_id"] = oidc_session_id

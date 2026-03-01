@@ -1,6 +1,7 @@
 """Department endpoints."""
 from flask import g, request
 from marshmallow import Schema, fields, validate, ValidationError
+from sqlalchemy.orm.attributes import flag_modified
 
 from gatehouse_app.api.v1 import api_v1_bp
 from gatehouse_app.utils.response import api_response
@@ -422,7 +423,7 @@ def add_department_member(org_id, dept_id):
                 error_type="NOT_FOUND",
             )
 
-        # Check if already a member
+        # Check if already an active member
         existing = DepartmentMembership.query.filter_by(
             user_id=user.id,
             department_id=dept_id,
@@ -437,12 +438,23 @@ def add_department_member(org_id, dept_id):
                 error_type="CONFLICT",
             )
 
-        # Add member
-        membership = DepartmentMembership(
-            user_id=user.id,
-            department_id=dept_id,
-        )
-        db.session.add(membership)
+        # Check for a previously soft-deleted row and resurrect it instead of inserting
+        soft_deleted = DepartmentMembership.query.filter(
+            DepartmentMembership.user_id == user.id,
+            DepartmentMembership.department_id == dept_id,
+            DepartmentMembership.deleted_at.isnot(None)
+        ).first()
+
+        if soft_deleted:
+            soft_deleted.deleted_at = None
+            membership = soft_deleted
+        else:
+            membership = DepartmentMembership(
+                user_id=user.id,
+                department_id=dept_id,
+            )
+            db.session.add(membership)
+
         db.session.commit()
 
         member_dict = membership.to_dict()
@@ -560,3 +572,128 @@ def get_department_principals(org_id, dept_id):
         },
         message="Principals retrieved successfully",
     )
+
+
+# ---------------------------------------------------------------------------
+# Department Certificate Policy
+# ---------------------------------------------------------------------------
+
+@api_v1_bp.route("/organizations/<org_id>/departments/<dept_id>/cert-policy", methods=["GET"])
+@login_required
+@require_admin
+@full_access_required
+def get_dept_cert_policy(org_id, dept_id):
+    """Get the certificate issuance policy for a department (admin only)."""
+    from gatehouse_app.models.organization.department_cert_policy import DepartmentCertPolicy, STANDARD_EXTENSIONS
+
+    dept = Department.query.filter_by(
+        id=dept_id, organization_id=org_id, deleted_at=None
+    ).first()
+    if not dept:
+        return api_response(success=False, message="Department not found", status=404, error_type="NOT_FOUND")
+
+    policy = DepartmentCertPolicy.query.filter(
+        DepartmentCertPolicy.department_id == dept_id,
+        DepartmentCertPolicy.deleted_at.is_(None),
+    ).first()
+
+    if policy:
+        data = policy.to_dict()
+    else:
+        # Return default (all standard extensions, no user expiry choice)
+        data = {
+            "department_id": str(dept_id),
+            "allow_user_expiry": False,
+            "default_expiry_hours": 1,
+            "max_expiry_hours": 24,
+            "allowed_extensions": list(STANDARD_EXTENSIONS),
+            "custom_extensions": [],
+            "all_extensions": list(STANDARD_EXTENSIONS),
+            "standard_extensions": list(STANDARD_EXTENSIONS),
+        }
+
+    return api_response(data={"cert_policy": data}, message="Certificate policy retrieved")
+
+
+@api_v1_bp.route("/organizations/<org_id>/departments/<dept_id>/cert-policy", methods=["PUT"])
+@login_required
+@require_admin
+@full_access_required
+def set_dept_cert_policy(org_id, dept_id):
+    """Create or update the certificate issuance policy for a department (admin only)."""
+    from gatehouse_app.models.organization.department_cert_policy import DepartmentCertPolicy, STANDARD_EXTENSIONS
+
+    dept = Department.query.filter_by(
+        id=dept_id, organization_id=org_id, deleted_at=None
+    ).first()
+    if not dept:
+        return api_response(success=False, message="Department not found", status=404, error_type="NOT_FOUND")
+
+    body = request.get_json() or {}
+
+    # Validate expiry values
+    default_expiry = body.get("default_expiry_hours")
+    max_expiry = body.get("max_expiry_hours")
+    if default_expiry is not None:
+        try:
+            default_expiry = int(default_expiry)
+            if default_expiry < 1:
+                raise ValueError
+        except (ValueError, TypeError):
+            return api_response(success=False, message="default_expiry_hours must be a positive integer", status=400, error_type="VALIDATION_ERROR")
+    if max_expiry is not None:
+        try:
+            max_expiry = int(max_expiry)
+            if max_expiry < 1:
+                raise ValueError
+        except (ValueError, TypeError):
+            return api_response(success=False, message="max_expiry_hours must be a positive integer", status=400, error_type="VALIDATION_ERROR")
+    if default_expiry and max_expiry and default_expiry > max_expiry:
+        return api_response(success=False, message="default_expiry_hours cannot exceed max_expiry_hours", status=400, error_type="VALIDATION_ERROR")
+
+    # Validate allowed_extensions — must be subset of STANDARD_EXTENSIONS
+    allowed_extensions = body.get("allowed_extensions")
+    if allowed_extensions is not None:
+        if not isinstance(allowed_extensions, list):
+            return api_response(success=False, message="allowed_extensions must be a list", status=400, error_type="VALIDATION_ERROR")
+        invalid_ext = [e for e in allowed_extensions if e not in STANDARD_EXTENSIONS]
+        if invalid_ext:
+            return api_response(
+                success=False,
+                message=f"Invalid standard extensions: {', '.join(invalid_ext)}. Valid: {', '.join(STANDARD_EXTENSIONS)}",
+                status=400,
+                error_type="VALIDATION_ERROR",
+            )
+
+    # Validate custom_extensions — plain strings
+    custom_extensions = body.get("custom_extensions")
+    if custom_extensions is not None:
+        if not isinstance(custom_extensions, list) or not all(isinstance(e, str) for e in custom_extensions):
+            return api_response(success=False, message="custom_extensions must be a list of strings", status=400, error_type="VALIDATION_ERROR")
+
+    policy = DepartmentCertPolicy.query.filter(
+        DepartmentCertPolicy.department_id == dept_id,
+        DepartmentCertPolicy.deleted_at.is_(None),
+    ).first()
+
+    if policy is None:
+        policy = DepartmentCertPolicy(department_id=dept_id)
+        db.session.add(policy)
+
+    if "allow_user_expiry" in body:
+        policy.allow_user_expiry = bool(body["allow_user_expiry"])
+    if default_expiry is not None:
+        policy.default_expiry_hours = default_expiry
+    if max_expiry is not None:
+        policy.max_expiry_hours = max_expiry
+    if allowed_extensions is not None:
+        policy.allowed_extensions = list(allowed_extensions)
+        flag_modified(policy, "allowed_extensions")
+    if custom_extensions is not None:
+        policy.custom_extensions = list(custom_extensions)
+        flag_modified(policy, "custom_extensions")
+
+    db.session.commit()
+
+    return api_response(data={"cert_policy": policy.to_dict()}, message="Certificate policy saved")
+

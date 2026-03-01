@@ -116,3 +116,11 @@ class BaseConfig:
 
     # Frontend URL (for OAuth callback redirects)
     FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8080")
+
+    # Email / SMTP
+    EMAIL_ENABLED = os.getenv("EMAIL_ENABLED", "False").lower() == "true"
+    SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+    FROM_ADDRESS = os.getenv("FROM_ADDRESS", "noreply@gatehouse.local")

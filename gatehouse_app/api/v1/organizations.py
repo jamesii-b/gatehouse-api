@@ -381,6 +381,7 @@ def update_member_role(org_id, user_id):
 
 @api_v1_bp.route("/organizations/<org_id>/audit-logs", methods=["GET"])
 @login_required
+@require_admin
 @full_access_required
 def get_organization_audit_logs(org_id):
     """
@@ -397,7 +398,7 @@ def get_organization_audit_logs(org_id):
         403: Not a member / insufficient permissions
         404: Organization not found
     """
-    from gatehouse_app.models.audit_log import AuditLog
+    from gatehouse_app.models.auth.audit_log import AuditLog
 
     # Ensure org exists and user is a member (full_access_required handles this)
     OrganizationService.get_organization_by_id(org_id)
@@ -492,7 +493,7 @@ def create_org_invite(org_id):
     app_url = current_app.config.get("APP_URL", "http://localhost:8080")
     invite_link = f"{app_url}/invite?token={invite.token}"
 
-    NotificationService._send_email(
+    email_sent = NotificationService._send_email(
         to_address=email,
         subject=f"You're invited to join {org.name} on Gatehouse",
         body=(
@@ -503,11 +504,101 @@ def create_org_invite(org_id):
         ),
     )
 
+    # In dev mode email may not be configured — always log the link so it's findable
+    import logging
+    if not email_sent:
+        logging.getLogger(__name__).warning(
+            f"[INVITE LINK] Email not sent (EMAIL_ENABLED=False or SMTP down). "
+            f"Invite for {email} → {invite_link}"
+        )
+    else:
+        logging.getLogger(__name__).info(
+            f"[INVITE] Email sent successfully to {email}"
+        )
+
+    response_data = {
+        "invite": {
+            "id": invite.id,
+            "email": invite.email,
+            "role": invite.role,
+            "expires_at": invite.expires_at.isoformat() + "Z",
+            # Only include invite_link when email delivery failed — signals frontend to show copy dialog
+            **({"invite_link": invite_link} if not email_sent else {}),
+        }
+    }
+
     return api_response(
-        data={"invite": {"id": invite.id, "email": invite.email, "role": invite.role, "expires_at": invite.expires_at.isoformat() + "Z"}},
+        data=response_data,
         message="Invite sent successfully",
         status=201,
     )
+
+
+@api_v1_bp.route("/organizations/<org_id>/invites", methods=["GET"])
+@login_required
+@require_admin
+def list_org_invites(org_id):
+    """List pending invite tokens for an organization.
+
+    Returns:
+        200: List of invites
+        403: Not an admin
+        404: Organization not found
+    """
+    from gatehouse_app.models import OrgInviteToken, Organization
+
+    org = Organization.query.filter_by(id=org_id, deleted_at=None).first()
+    if not org:
+        return api_response(success=False, message="Organization not found", status=404)
+
+    invites = (
+        OrgInviteToken.query.filter_by(organization_id=org_id)
+        .filter(OrgInviteToken.accepted_at == None)
+        .filter(OrgInviteToken.deleted_at == None)
+        .all()
+    )
+
+    def invite_to_dict(inv):
+        return {
+            "id": inv.id,
+            "email": inv.email,
+            "role": inv.role,
+            "invited_by_id": inv.invited_by_id,
+            "created_at": inv.created_at.isoformat() + "Z",
+            "expires_at": inv.expires_at.isoformat() + "Z",
+        }
+
+    return api_response(
+        data={"invites": [invite_to_dict(i) for i in invites]},
+        message="Invites retrieved",
+    )
+
+
+@api_v1_bp.route("/organizations/<org_id>/invites/<invite_id>", methods=["DELETE"])
+@login_required
+@require_admin
+def cancel_org_invite(org_id, invite_id):
+    """Cancel (soft-delete) an organization invite.
+
+    Returns:
+        200: Invite cancelled
+        403: Not an admin
+        404: Invite not found
+    """
+    from gatehouse_app.models import OrgInviteToken, Organization
+
+    org = Organization.query.filter_by(id=org_id, deleted_at=None).first()
+    if not org:
+        return api_response(success=False, message="Organization not found", status=404)
+
+    invite = OrgInviteToken.query.filter_by(id=invite_id, organization_id=org_id, deleted_at=None).first()
+    if not invite:
+        return api_response(success=False, message="Invite not found", status=404)
+
+    # Soft delete the invite so it's no longer usable
+    invite.delete(soft=True)
+
+    return api_response(data={}, message="Invite cancelled")
 
 
 @api_v1_bp.route("/invites/<token>", methods=["GET"])
@@ -518,17 +609,20 @@ def get_invite(token):
         200: Invite details (org name, email)
         400: Invalid or expired token
     """
-    from gatehouse_app.models import OrgInviteToken
+    from gatehouse_app.models import OrgInviteToken, User
 
     invite = OrgInviteToken.query.filter_by(token=token).first()
     if not invite or not invite.is_valid:
         return api_response(success=False, message="This invitation link is invalid or has expired.", status=400, error_type="INVALID_TOKEN")
+
+    user_exists = User.query.filter_by(email=invite.email, deleted_at=None).first() is not None
 
     return api_response(
         data={
             "email": invite.email,
             "organization": {"id": invite.organization_id, "name": invite.organization.name},
             "role": invite.role,
+            "user_exists": user_exists,
         },
         message="Invite found",
     )
@@ -617,12 +711,14 @@ def accept_invite(token):
 
 @api_v1_bp.route("/organizations/<org_id>/clients", methods=["GET"])
 @login_required
+@require_admin
+@full_access_required
 def list_org_clients(org_id):
     """List OIDC clients for an organization.
 
     Returns:
         200: List of OIDC clients
-        403: Not a member
+        403: Not an admin
         404: Organization not found
     """
     from gatehouse_app.models import OIDCClient, Organization
@@ -838,16 +934,18 @@ def get_system_audit_logs():
         success       – "true"/"false"
         q             – free-text search on description
     """
-    from gatehouse_app.models.audit_log import AuditLog
-    from gatehouse_app.models.organization_member import OrganizationMember
+    from gatehouse_app.models.auth.audit_log import AuditLog
+    from gatehouse_app.models.organization.organization_member import OrganizationMember
 
     current_user = g.current_user
     page = max(1, int(request.args.get("page", 1)))
     per_page = min(int(request.args.get("per_page", 50)), 200)
 
-    # Check if the user is an owner of any org to grant admin-level access
-    is_admin = OrganizationMember.query.filter_by(
-        user_id=current_user.id, role="OWNER"
+    # Check if the user is an admin or owner of any org to grant admin-level access
+    is_admin = OrganizationMember.query.filter(
+        OrganizationMember.user_id == current_user.id,
+        OrganizationMember.role.in_(["OWNER", "ADMIN"]),
+        OrganizationMember.deleted_at == None,
     ).first() is not None
 
     query = AuditLog.query
@@ -905,7 +1003,7 @@ def get_my_audit_logs():
         per_page – results per page (default 50, max 200)
         action   – filter by AuditAction value
     """
-    from gatehouse_app.models.audit_log import AuditLog
+    from gatehouse_app.models.auth.audit_log import AuditLog
 
     current_user = g.current_user
     page = max(1, int(request.args.get("page", 1)))
@@ -947,8 +1045,8 @@ def list_organization_roles(org_id):
         401: Not authenticated
         404: Organization not found
     """
-    from gatehouse_app.models.organization import Organization
-    from gatehouse_app.models.organization_member import OrganizationMember
+    from gatehouse_app.models.organization.organization import Organization
+    from gatehouse_app.models.organization.organization_member import OrganizationMember
 
     org = Organization.query.filter_by(id=org_id, deleted_at=None).first()
     if not org:
@@ -996,7 +1094,7 @@ def assign_role_to_member(org_id, role_name):
         403: Not an admin/owner
         404: Org or member not found
     """
-    from gatehouse_app.models.organization_member import OrganizationMember
+    from gatehouse_app.models.organization.organization_member import OrganizationMember
     from gatehouse_app.extensions import db
 
     try:
@@ -1040,7 +1138,7 @@ def remove_role_from_member(org_id, role_name, user_id):
         403: Not an admin/owner
         404: Org or member not found
     """
-    from gatehouse_app.models.organization_member import OrganizationMember
+    from gatehouse_app.models.organization.organization_member import OrganizationMember
     from gatehouse_app.extensions import db
 
     try:
@@ -1074,8 +1172,8 @@ def list_org_cas(org_id):
         403: Not admin/owner
         404: Org not found
     """
-    from gatehouse_app.models.ca import CA
-    from gatehouse_app.models.organization import Organization
+    from gatehouse_app.models.ssh_ca.ca import CA
+    from gatehouse_app.models.organization.organization import Organization
 
     org = Organization.query.filter_by(id=org_id, deleted_at=None).first()
     if not org:
@@ -1104,8 +1202,8 @@ def update_org_ca(org_id, ca_id):
         403: Not admin/owner
         404: Org or CA not found
     """
-    from gatehouse_app.models.ca import CA
-    from gatehouse_app.models.organization import Organization
+    from gatehouse_app.models.ssh_ca.ca import CA
+    from gatehouse_app.models.organization.organization import Organization
     from marshmallow import Schema, fields, validate, ValidationError
 
     org = Organization.query.filter_by(id=org_id, deleted_at=None).first()
@@ -1192,8 +1290,8 @@ def create_org_ca(org_id):
         403: Not admin/owner
         404: Org not found
     """
-    from gatehouse_app.models.ca import CA, KeyType
-    from gatehouse_app.models.organization import Organization
+    from gatehouse_app.models.ssh_ca.ca import CA, KeyType
+    from gatehouse_app.models.organization.organization import Organization
     from gatehouse_app.utils.crypto import compute_ssh_fingerprint
     from marshmallow import Schema, fields as ma_fields, validate, ValidationError as MaValidationError
     from sshkey_tools.keys import Ed25519PrivateKey, RsaPrivateKey, EcdsaPrivateKey
@@ -1227,7 +1325,7 @@ def create_org_ca(org_id):
             )
 
         # Enforce one CA per type per org
-        from gatehouse_app.models.ca import CaType
+        from gatehouse_app.models.ssh_ca.ca import CaType
         ca_type_val = data["ca_type"]
         existing_type = CA.query.filter_by(
             organization_id=org_id, deleted_at=None

@@ -111,5 +111,79 @@ def mfa_compliance_status():
     print("=" * 60)
 
 
+@cli.command("configure_oauth")
+def configure_oauth():
+    """Interactively configure an OAuth provider at the application level.
+
+    Usage:
+        python manage.py configure_oauth
+
+    Supported providers: google, github, microsoft
+    """
+    import getpass
+    from gatehouse_app.models.authentication_method import ApplicationProviderConfig
+    from gatehouse_app.extensions import db
+
+    SUPPORTED = ["google", "github", "microsoft"]
+
+    print("=" * 60)
+    print("OAuth Provider Configuration")
+    print("=" * 60)
+    print(f"Supported providers: {', '.join(SUPPORTED)}")
+
+    provider = input("Provider [google/github/microsoft]: ").strip().lower()
+    if provider not in SUPPORTED:
+        print(f"❌ Unknown provider: {provider}")
+        return
+
+    client_id = input("Client ID: ").strip()
+    if not client_id:
+        print("❌ client_id is required")
+        return
+
+    client_secret = getpass.getpass("Client Secret (leave blank to keep existing): ").strip()
+
+    with app.app_context():
+        config = ApplicationProviderConfig.query.filter_by(provider_type=provider).first()
+        if config:
+            config.client_id = client_id
+            if client_secret:
+                config.set_client_secret(client_secret)
+            config.is_enabled = True
+            db.session.commit()
+            print(f"✅ Updated {provider} provider config.")
+        else:
+            config = ApplicationProviderConfig(
+                provider_type=provider,
+                client_id=client_id,
+                is_enabled=True,
+            )
+            if client_secret:
+                config.set_client_secret(client_secret)
+            db.session.add(config)
+            db.session.commit()
+            print(f"✅ Created {provider} provider config.")
+
+
+@cli.command("list_oauth")
+def list_oauth():
+    """List all configured OAuth providers.
+
+    Usage:
+        python manage.py list_oauth
+    """
+    from gatehouse_app.models.authentication_method import ApplicationProviderConfig
+
+    with app.app_context():
+        configs = ApplicationProviderConfig.query.all()
+        if not configs:
+            print("No OAuth providers configured.")
+            return
+        print(f"{'Provider':<15} {'Client ID':<40} {'Enabled'}")
+        print("-" * 65)
+        for c in configs:
+            print(f"{c.provider_type:<15} {c.client_id:<40} {c.is_enabled}")
+
+
 if __name__ == "__main__":
     cli()

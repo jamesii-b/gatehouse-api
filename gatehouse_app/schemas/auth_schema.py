@@ -25,7 +25,7 @@ class LoginSchema(Schema):
 
     email = fields.Email(required=True)
     password = fields.Str(required=True, validate=validate.Length(min=1))
-    remember_me = fields.Bool(missing=False)
+    remember_me = fields.Bool(load_default=False)
 
 
 class RefreshTokenSchema(Schema):
@@ -78,7 +78,7 @@ class TOTPVerifySchema(Schema):
     """Schema for TOTP code verification during login."""
 
     code = fields.Str(required=True)
-    is_backup_code = fields.Bool(missing=False)
+    is_backup_code = fields.Bool(load_default=False)
     client_timestamp = fields.Int(
         required=False,
         allow_none=True,

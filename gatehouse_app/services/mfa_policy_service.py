@@ -4,11 +4,11 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any
 
 from gatehouse_app.extensions import db
-from gatehouse_app.models.organization_security_policy import OrganizationSecurityPolicy
-from gatehouse_app.models.user_security_policy import UserSecurityPolicy
-from gatehouse_app.models.mfa_policy_compliance import MfaPolicyCompliance
-from gatehouse_app.models.user import User
-from gatehouse_app.models.organization import Organization
+from gatehouse_app.models.security.organization_security_policy import OrganizationSecurityPolicy
+from gatehouse_app.models.security.user_security_policy import UserSecurityPolicy
+from gatehouse_app.models.security.mfa_policy_compliance import MfaPolicyCompliance
+from gatehouse_app.models.user.user import User
+from gatehouse_app.models.organization.organization import Organization
 from gatehouse_app.services.audit_service import AuditService
 from gatehouse_app.utils.constants import (
     MfaPolicyMode,
@@ -702,7 +702,7 @@ class MfaPolicyService:
         if now is None:
             now = datetime.now(timezone.utc)
         
-        from gatehouse_app.models.organization_member import OrganizationMember
+        from gatehouse_app.models.organization.organization_member import OrganizationMember
         
         updated_count = 0
         

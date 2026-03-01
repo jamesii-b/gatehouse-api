@@ -1,6 +1,5 @@
 #!/usr/bin/python3
 import base64
-from datetime import datetime
 import os
 import sys
 import webbrowser
@@ -17,7 +16,6 @@ from sshkey_tools.cert import SSHCertificate
 import logging
 import coloredlogs
 import subprocess
-import base64
 
 # Load environment variables from the .env file
 load_dotenv()
@@ -36,11 +34,18 @@ CHALLENGE_SIG_FILE_PATH = "/tmp/challenge.txt.sig"
 logger = logging.getLogger(__name__)
 coloredlogs.install(level='DEBUG', logger=logger, fmt='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 
+token = ""
+
+def auth_headers(content_type="application/json"):
+    """Return auth headers using the current cached token."""
+    return {"Authorization": f"Bearer {token}", "Content-Type": content_type}
+
 
 class MyServer(BaseHTTPRequestHandler):
     def do_GET(self):
         """Handle GET requests and process token reception."""
         global server_done, token
+
         self.send_response(200)
         self.send_header("Content-type", "text/html")
         self.end_headers()
@@ -49,12 +54,13 @@ class MyServer(BaseHTTPRequestHandler):
         self.wfile.write(bytes("<p>Window closing in <span id='countdown'>5</span> seconds...</p>", "utf-8"))
         self.wfile.write(bytes("<script>var count = 5; setInterval(function() { count--; document.getElementById('countdown').textContent = count; if (count === 0) window.close(); }, 1000);</script>", "utf-8"))
         self.wfile.write(bytes("</body></html>", "utf-8"))
-        
+
         parsed_url = urlparse(self.path)
         query_data = dict(parse_qsl(parsed_url.query))
-        token = query_data.get('token')
+        received_token = query_data.get('token')
 
-        if token:
+        if received_token:
+            token = received_token
             server_done = True
             logger.info("Token received")
             save_token_to_cache(token)
@@ -87,37 +93,42 @@ def clear_token_cache():
         logger.info("No cached token found.")
 
 def decode_and_validate_token(token):
-    """Decode the JWT and validate its claims."""
+    """Decode the JWT and validate its claims.
+
+    Returns True if the token is a valid, non-expired JWT.
+    Returns False if the token is not a JWT (e.g. opaque session token)
+    or if it has expired — callers should then fall back to /auth/me.
+    """
     try:
         decoded_token = jwt.decode(token, options={"verify_signature": False})
-        logger.debug("debug_jwt - Decoded token ok")
-
-        iat = decoded_token.get('iat')
-        exp = decoded_token.get('exp')
-
-        if iat is None or exp is None:
-            raise ValueError("Token must contain 'iat' and 'exp' claims.")
-
-        iat_utc = datetime.datetime.fromtimestamp(iat, pytz.UTC).isoformat()
-        exp_utc = datetime.datetime.fromtimestamp(exp, pytz.UTC).isoformat()
-
-        logger.debug(f"debug_jwt - iat (UTC ISO): {iat_utc}")
-        logger.debug(f"debug_jwt - exp (UTC ISO): {exp_utc}")
-
-        now = datetime.datetime.now(pytz.UTC)
-
-        if datetime.datetime.fromtimestamp(iat, pytz.UTC) > now:
-            logger.debug(f"debug_jwt - Token 'iat' is after the current time.")
-
-        if datetime.datetime.fromtimestamp(exp, pytz.UTC) < now:
-            logger.debug(f"debug_jwt - Token 'exp' is before the current time.")
-            return False  # Token has expired
-
-        return True  # Token is valid
-
-    except Exception as e:
-        logger.debug(f"Token validation failed: {e}")
+    except jwt.exceptions.DecodeError:
+        # Not a JWT — likely an opaque session token; let /auth/me handle it.
         return False
+    except Exception as e:
+        logger.debug(f"Unexpected JWT decode error: {e}")
+        return False
+
+    iat = decoded_token.get('iat')
+    exp = decoded_token.get('exp')
+
+    if iat is None or exp is None:
+        logger.debug("JWT is missing 'iat' or 'exp' claims — treating as invalid.")
+        return False
+
+    now = datetime.datetime.now(pytz.UTC)
+    exp_dt = datetime.datetime.fromtimestamp(exp, pytz.UTC)
+    iat_dt = datetime.datetime.fromtimestamp(iat, pytz.UTC)
+
+    logger.debug(f"JWT iat={iat_dt.isoformat()}  exp={exp_dt.isoformat()}")
+
+    if exp_dt < now:
+        logger.debug("JWT has expired.")
+        return False
+
+    if iat_dt > now:
+        logger.debug("JWT 'iat' is in the future — clock skew?")
+
+    return True
 
 def request_token():
     global server_done, token
@@ -177,57 +188,80 @@ def request_token():
     return token
 
 def get_activated_ssh_key():
-    """Retrieve the list of SSH keys and return the first verified key."""
+    """Retrieve the list of SSH keys and return the ID of a verified key."""
     try:
-        headers = {
-            'Authorization': f'Bearer {token}',
-            'Content-Type': 'application/json'
-        }
-        response = requests.get(f"{SIGN_URL}/api/v1/ssh/keys", headers=headers)
-
-        if response.status_code == 200:
-            keys = response.json().get('keys', [])
-            verified_keys = [key for key in keys if key['verified']]
-            
-            if not verified_keys:
-                logger.error("No verified SSH keys found for the user.")
-                exit(1)
-
-            if len(verified_keys) > 1:
-                # If running interactively, let the user pick; otherwise use the most recently added key
-                if sys.stdout.isatty():
-                    print("\nMultiple verified SSH keys found. Please choose one:")
-                    for i, k in enumerate(verified_keys):
-                        print(f"  [{i+1}] {k['id'][:8]}...  fingerprint={k.get('fingerprint','?')}  name={k.get('key_comment','?')}")
-                    try:
-                        choice = int(input("Enter number: ").strip()) - 1
-                        if 0 <= choice < len(verified_keys):
-                            return verified_keys[choice]['id']
-                    except (ValueError, EOFError):
-                        pass
-                logger.info("Multiple verified SSH keys found; using the most recently added one.")
-                verified_keys.sort(key=lambda k: k.get('created_at', ''), reverse=True)
-
-            return verified_keys[0]['id']
-
-        else:
+        response = requests.get(f"{SIGN_URL}/api/v1/ssh/keys", headers=auth_headers())
+        if response.status_code != 200:
             logger.error(f"Failed to retrieve SSH keys: {response.status_code} - {response.text}")
             exit(1)
 
+        keys = response.json().get('data', {}).get('keys', [])
+        verified_keys = [k for k in keys if k['verified']]
+
+        if not verified_keys:
+            logger.error("No verified SSH keys found for the user.")
+            exit(1)
+
+        if len(verified_keys) > 1 and sys.stdout.isatty():
+            print("\nMultiple verified SSH keys found. Please choose one:")
+            for i, k in enumerate(verified_keys):
+                print(f"  [{i+1}] {k['id'][:8]}...  fingerprint={k.get('fingerprint','?')}  name={k.get('key_comment','?')}")
+            try:
+                choice = int(input("Enter number: ").strip()) - 1
+                if 0 <= choice < len(verified_keys):
+                    return verified_keys[choice]['id']
+            except (ValueError, EOFError):
+                pass
+            logger.info("Invalid choice; using the most recently added key.")
+
+        verified_keys.sort(key=lambda k: k.get('created_at', ''), reverse=True)
+        return verified_keys[0]['id']
+
+    except SystemExit:
+        raise
     except Exception as e:
         logger.error(f"Error while retrieving SSH keys: {e}")
         exit(1)
 
 
-def request_certificate(principals=None):
+def fetch_my_principals():
+    """Fetch all principal names the current user is entitled to from the API.
+    For regular members: returns their assigned principals.
+    For org admins/owners: returns all principals in the org (they can sign for any).
+    """
+    global token
+    response = requests.get(
+        f"{SIGN_URL}/api/v1/users/me/principals",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10,
+    )
+    if response.status_code != 200:
+        logger.error(f"Failed to fetch principals from server: {response.status_code} - {response.text}")
+        exit(1)
+
+    orgs = response.json().get("data", {}).get("orgs", [])
+    principal_names = []
+    for org in orgs:
+        # Admins/owners get all principals; regular members get only their assigned ones
+        if org.get("is_admin"):
+            source = org.get("all_principals", [])
+        else:
+            source = org.get("my_principals", [])
+        for p in source:
+            if p["name"] not in principal_names:
+                principal_names.append(p["name"])
+
+    return principal_names
+
+
+def request_certificate():
     CERT_ID = os.getenv("CERT_ID") or get_activated_ssh_key()
 
+    principals = fetch_my_principals()
     if not principals:
-        env_principals = os.getenv("PRINCIPALS")
-        if env_principals:
-            principals = [p.strip() for p in env_principals.split(',')]
-        else:
-            principals = [os.getlogin()]
+        logger.error("You have no principals assigned. Contact your org admin.")
+        exit(1)
+    logger.info(f"Requesting certificate for principals: {', '.join(principals)}")
 
     headers = {
         'content-type': 'application/json',
@@ -243,7 +277,7 @@ def request_certificate(principals=None):
         response = requests.post(f"{SIGN_URL}/api/v1/ssh/sign", json=payload, headers=headers)
 
         if response.status_code == 201:
-            json_result = response.json()
+            json_result = response.json().get('data', response.json())
             with open(CERT_FILE_PATH, 'w') as f:
                 f.write(json_result['certificate'])
             logger.info(f"Certificate signed successfully, located at {CERT_FILE_PATH}")
@@ -257,124 +291,84 @@ def request_certificate(principals=None):
     except Exception as e:
         logger.error(f"Error during certificate signing: {e}")
 
-def generate_and_sign_challenge(ssh_key_file,key_id):
-    """Generate a challenge text, sign it using the SSH key, and return the signature."""
+def generate_and_sign_challenge(ssh_key_file, key_id):
+    """Fetch a challenge from the server, sign it with the SSH key, and submit the signature."""
     logger.debug(f"generate_and_sign_challenge - {ssh_key_file} {key_id}")
-    #Fetch challenge text from API
-    try:
-        global token                                                                                                                                                        
-        
-        if not token:                                                                                                                                               
-            raise EnvironmentError("TOKEN environment variable is not set")   
-        headers = {
-            'Authorization': f'Bearer {token}',                                                                                                                     
-            "Content-Type": "application/json",
-        }
 
-        # Send the POST request
-        response = requests.get(
-            f"{SIGN_URL}/api/v1/ssh/keys/{key_id}/verify",
-            headers=headers
-        )
-        if response.status_code!=200:
+    # Fetch challenge text
+    try:
+        response = requests.get(f"{SIGN_URL}/api/v1/ssh/keys/{key_id}/verify", headers=auth_headers())
+        if response.status_code != 200:
             logger.error(f"Server returned unexpected code {response.status_code}")
             return False
-        
-        challenge_text=response.json().get('challenge_text', response.json().get('validationText', ''))+"\n"
-        
+        resp_json = response.json()
+        data = resp_json.get('data', resp_json)
+        challenge_text = data.get('challenge_text', data.get('validationText', '')) + "\n"
     except Exception as e:
-        logger.error(f"Unable to fetch SSH Key validation data {e}")
+        logger.error(f"Unable to fetch SSH Key validation data: {e}")
         return False
 
+    # Sign the challenge
     try:
-        logger.debug(f"generate_and_sign_challenge - procesing challenge with text {challenge_text}")
-        
-        if os.path.exists(CHALLENGE_FILE_PATH):
-            os.remove(CHALLENGE_FILE_PATH)
-        if os.path.exists(CHALLENGE_SIG_FILE_PATH):
-            os.remove(CHALLENGE_SIG_FILE_PATH)
+        for path in (CHALLENGE_FILE_PATH, CHALLENGE_SIG_FILE_PATH):
+            if os.path.exists(path):
+                os.remove(path)
 
         with open(CHALLENGE_FILE_PATH, 'w') as f:
             f.write(challenge_text)
 
-        # Sign the challenge text using the SSH key
-        result=subprocess.run(["ssh-keygen", "-Y", "sign", "-f", ssh_key_file, "-n", "file", CHALLENGE_FILE_PATH], check=True)
-        logger.debug(f"generate_and_sign_challenge - {result}")
-        # Read the signature
-        with open(CHALLENGE_SIG_FILE_PATH, 'rb') as f:
-            signature = base64.b64encode(f.read()).decode('utf-8')
-            submit_signature_validation(signature,key_id)
-        return signature
-    except Exception as e:
-        logger.error(f"Unable to sign the challenge reponse {e}")
-
-def submit_signature_validation(signature, key_id):
-    try:
-        # Define the headers and payload
-        global token                                                                                                                                                        
-        
-        if not token:                                                                                                                                               
-            raise EnvironmentError("TOKEN environment variable is not set")   
-        headers = {
-            'Authorization': f'Bearer {token}',                                                                                                                     
-            "Content-Type": "application/json",
-        }
-        logger.debug(f"submit_signature_validation - {signature}")
-        payload = {
-            "signature": signature
-        }
-
-        # Send the POST request
-        response = requests.post(
-            f"{SIGN_URL}/api/v1/ssh/keys/{key_id}/verify",
-            headers=headers,
-            json=payload
+        subprocess.run(
+            ["ssh-keygen", "-Y", "sign", "-f", ssh_key_file, "-n", "file", CHALLENGE_FILE_PATH],
+            check=True,
         )
 
-        # Print the response
-        print(response.status_code)
-        print(response.text)
+        with open(CHALLENGE_SIG_FILE_PATH, 'rb') as f:
+            signature = base64.b64encode(f.read()).decode('utf-8')
     except Exception as e:
-        logger.error(f"submit_signature_validation - Unable to submit the challenge response {e}")
+        logger.error(f"Unable to sign the challenge response: {e}")
+        return False
+
+    # Submit signature
+    try:
+        response = requests.post(
+            f"{SIGN_URL}/api/v1/ssh/keys/{key_id}/verify",
+            headers=auth_headers(),
+            json={"signature": signature},
+        )
+        if response.status_code == 200:
+            logger.info("SSH key verified successfully.")
+        else:
+            logger.error(f"Verification failed: {response.status_code} - {response.text}")
+    except Exception as e:
+        logger.error(f"Unable to submit the challenge response: {e}")
+
+    return signature
 
 def remove_ssh_key(key_id=None):
     """
     Remove an SSH key from the server. If key_id is None, list keys and prompt user to pick one.
     """
-    global token
-
-    if not token:
-        raise EnvironmentError("TOKEN environment variable is not set")
-
-    headers = {
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'application/json'
-    }
-
-    # List keys first
-    response = requests.get(f"{SIGN_URL}/api/v1/ssh/keys", headers=headers)
+    response = requests.get(f"{SIGN_URL}/api/v1/ssh/keys", headers=auth_headers())
     if response.status_code != 200:
         logger.error(f"Failed to list SSH keys: {response.status_code} - {response.text}")
         exit(1)
 
-    keys = response.json().get('keys', [])
+    keys = response.json().get('data', {}).get('keys', [])
     if not keys:
         logger.info("No SSH keys found for your user.")
         return
 
     if key_id:
-        # Delete specific key
         target = next((k for k in keys if k['id'] == key_id), None)
         if not target:
             logger.error(f"Key ID {key_id} not found in your profile.")
             exit(1)
         keys_to_delete = [target]
     else:
-        # Show all keys and let user pick
         print("\nYour SSH keys:")
         for i, k in enumerate(keys):
             verified = "✓ verified" if k['verified'] else "✗ unverified"
-            print(f"  [{i+1}] {k['id']}  {verified}  {k.get('description','')}  (added {k['created_at'][:10]})")
+            print(f"  [{i+1}] {k['id']}  {verified}  {k.get('description', '')}  (added {k['created_at'][:10]})")
         print("  [a] Delete ALL keys")
         print("  [q] Quit")
         choice = input("\nEnter number to delete (or 'a' for all, 'q' to quit): ").strip().lower()
@@ -394,7 +388,7 @@ def remove_ssh_key(key_id=None):
                 exit(1)
 
     for k in keys_to_delete:
-        del_response = requests.delete(f"{SIGN_URL}/api/v1/ssh/keys/{k['id']}", headers=headers)
+        del_response = requests.delete(f"{SIGN_URL}/api/v1/ssh/keys/{k['id']}", headers=auth_headers())
         if del_response.status_code == 200:
             logger.info(f"Key {k['id']} removed successfully.")
         else:
@@ -402,56 +396,36 @@ def remove_ssh_key(key_id=None):
 
 
 def add_ssh_key(ssh_key_file):
-     """
-     Add an SSH key to the server.
-                                                                                                                                                                 
-     Args:
-         ssh_key_file (file): The SSH key file to be added.
-     """ 
-     global token                                                                                                                                                        
-     
-     if not token:                                                                                                                                               
-         raise EnvironmentError("TOKEN environment variable is not set")
-                                                                                                                                                                 
-     headers = {
-         'Authorization': f'Bearer {token}',
-         'Content-Type': 'application/json'
-     }
+    """Add an SSH key to the server and auto-verify it."""
+    if hasattr(ssh_key_file, 'read'):
+        key_bytes = ssh_key_file.read()
+        key_path = ssh_key_file.name
+    elif isinstance(ssh_key_file, bytes):
+        key_bytes = ssh_key_file
+        key_path = None
+    else:
+        key_path = str(ssh_key_file)
+        with open(key_path, 'rb') as f:
+            key_bytes = f.read()
 
-     if hasattr(ssh_key_file, 'read'):
-         # File object (e.g. argparse.FileType('rb'))
-         key_bytes = ssh_key_file.read()
-         key_path = ssh_key_file.name
-     elif isinstance(ssh_key_file, bytes):
-         key_bytes = ssh_key_file
-         key_path = None
-     else:
-         # String path
-         key_path = str(ssh_key_file)
-         with open(key_path, 'rb') as f:
-             key_bytes = f.read()
+    ssh_key = key_bytes.decode('utf-8').strip()
+    payload = {
+        'description': 'Added via gatehouse CLI tool',
+        'key': ssh_key,
+    }
 
-     ssh_key = key_bytes.decode('utf-8').strip()
-
-     payload = {                                                                                                                                                 
-         'description': 'Added via gatehouse CLI tool',                                                                                                                      
-         'key': ssh_key                                                                                                                                          
-     }                                                                                                                                                           
-                                                                                                                                                                 
-     response = requests.post(f"{SIGN_URL}/api/v1/ssh/keys", json=payload, headers=headers)
-
-     if response.status_code == 201:              
-         ssh_key_id=response.json()['id']
-         logger.info(f"SSH key {ssh_key_id} added successfully")
-         if key_path:
-             # Strip .pub suffix to get the private key path for signing
-             private_key_path = key_path[:-4] if key_path.endswith('.pub') else key_path
-             generate_and_sign_challenge(private_key_path, ssh_key_id)
-         else:
-             logger.warning("No key file path available — skipping auto-verification. "
-                            "Run with -k <path> to enable automatic key verification.")
-     else:                                                                                                                                                       
-         logger.error(f"Failed to add SSH key: {response.status_code} - {response.text}")
+    response = requests.post(f"{SIGN_URL}/api/v1/ssh/keys", json=payload, headers=auth_headers())
+    if response.status_code == 201:
+        ssh_key_id = response.json().get('data', {}).get('id')
+        logger.info(f"SSH key {ssh_key_id} added successfully")
+        if key_path:
+            private_key_path = key_path[:-4] if key_path.endswith('.pub') else key_path
+            generate_and_sign_challenge(private_key_path, ssh_key_id)
+        else:
+            logger.warning("No key file path available — skipping auto-verification. "
+                           "Run with -k <path> to enable automatic key verification.")
+    else:
+        logger.error(f"Failed to add SSH key: {response.status_code} - {response.text}")
 
 def checkCert():
     logger.info("Running cert check")
@@ -459,8 +433,11 @@ def checkCert():
         logger.warning("Certificate does not exist, new certificate required")
         return 1
 
-    # Check the current cert first
-    certificate = SSHCertificate.from_file(CERT_FILE_PATH)
+    try:
+        certificate = SSHCertificate.from_file(CERT_FILE_PATH)
+    except Exception:
+        logger.warning("Certificate file is invalid or corrupt, renewal required")
+        return 1
     
     # Get the current datetime
     now = datetime.datetime.now()
@@ -486,7 +463,6 @@ if __name__ == "__main__":
     parser.add_argument("-a", "--add-key", action='store_true', default=False, help="Add SSH key to the server")                                                
     parser.add_argument("-c", "--check-cert", action='store_true', default=False, help="Check the certificate, if it's valid exit 0, if it's invalid exit 1")
     parser.add_argument("-r", "--request-cert", action='store_true', default=False, help="Request that gatehouse sign a new certificate for you based on an SSH public key on file in your profile")
-    parser.add_argument("--principals", nargs='+', metavar='PRINCIPAL', help="Unix usernames for the certificate (default: current OS user)")
     parser.add_argument("--clear-cache", action='store_true', default=False, help="Remove the cached authentication token")
     parser.add_argument("--remove-key", nargs='?', const='', metavar='KEY_ID', help="Remove an SSH key from your profile. Omit KEY_ID to pick interactively.")
     parser.add_argument("--list-keys", action='store_true', default=False, help="List SSH keys in your profile")
@@ -515,13 +491,9 @@ if __name__ == "__main__":
 
     if args.list_keys:
         request_token()
-        response = requests.get(
-            f"{SIGN_URL}/api/v1/ssh/keys",
-            headers={"Authorization": f"Bearer {token}"},
-        )
+        response = requests.get(f"{SIGN_URL}/api/v1/ssh/keys", headers=auth_headers())
         if response.status_code == 200:
-            data = response.json()
-            keys = data.get('keys', [])
+            keys = response.json().get('data', {}).get('keys', [])
             if not keys:
                 print("No SSH keys found in your profile.")
             else:
@@ -548,14 +520,10 @@ if __name__ == "__main__":
         exit(0)                                                                                                                                                 
 
 
-    if args.request_cert:                                                                                                                                                                    
+    if args.request_cert:
+        request_token()
         if args.force:
-            request_token()
             logger.info("Forcing renewal of certificate")
-            request_certificate(principals=args.principals)
-        
-        if checkCert() == 1:
-            request_token()
-            request_certificate(principals=args.principals)
-    
+        if args.force or checkCert() == 1:
+            request_certificate()
         exit(0)

@@ -20,7 +20,7 @@ class SSHCAConfig:
     Example:
         config = SSHCAConfig()
         cert_hours = config.get_int('cert_validity_hours')
-        kms_key = config.get_str('aws_kms_key_id')
+        key_path = config.get_str('ca_key_path')
     """
 
     # Configuration file location (relative to project root)
@@ -28,32 +28,13 @@ class SSHCAConfig:
 
     # Default values if config file is missing
     DEFAULTS = {
-        'cert_validity_hours': '1',
-        'max_cert_validity_hours': '24',
-        'max_certs_per_user': '100',
-        'crl_enabled': 'true',
-        'crl_endpoint': 'https://ca.example.com/crl',
-        'crl_refresh_hours': '24',
-        'default_key_type': 'ed25519',
-        'rsa_key_bits': '4096',
-        'private_key_encryption': 'kms',
-        'aws_kms_key_id': '',
-        'extensions_enabled': 'true',
-        'extensions': 'permit-X11-forwarding,permit-agent-forwarding,permit-pty,permit-port-forwarding,permit-user-rc',
-        'critical_options_enabled': 'false',
+        'cert_validity_hours': '8',
+        'max_cert_validity_hours': '720',
+        'ca_key_path': '',
         'max_principals_per_cert': '256',
         'max_key_id_length': '255',
-        'log_level': 'INFO',
-        'audit_enabled': 'true',
-        'require_key_verification': 'true',
         'verification_challenge_max_age': '24',
-        'rate_limit_certs_per_minute': '5',
-        'request_timeout': '30',
         'auto_delete_unverified_days': '30',
-        'archive_expired_days': '365',
-        'oauth_token_endpoint': '/api/v1/oauth2/token',
-        'oauth_userinfo_endpoint': '/api/v1/oauth2/userinfo',
-        'ca_key_path': '',
     }
 
     def __init__(self, config_file: Optional[str] = None, environment: Optional[str] = None):
@@ -189,12 +170,12 @@ class SSHCAConfig:
 
     def validate_config(self) -> list:
         """Validate SSH CA configuration.
-        
+
         Returns:
             List of validation error messages (empty if valid)
         """
         errors = []
-        
+
         # Check cert validity hours
         try:
             validity = self.get_int('cert_validity_hours')
@@ -205,34 +186,16 @@ class SSHCAConfig:
                 )
         except ValueError as e:
             errors.append(f"Invalid cert validity hours: {e}")
-        
-        # Check key type
-        valid_key_types = ['ed25519', 'rsa', 'ecdsa']
-        key_type = self.get_str('default_key_type', 'ed25519')
-        if key_type not in valid_key_types:
-            errors.append(f"Invalid key type: {key_type}. Must be one of {valid_key_types}")
-        
-        # Check encryption method
-        valid_methods = ['kms', 'local']
-        encryption = self.get_str('private_key_encryption', 'kms')
-        if encryption not in valid_methods:
-            errors.append(f"Invalid private_key_encryption: {encryption}. Must be one of {valid_methods}")
-        
-        # Warn if using local encryption in production
-        if encryption == 'local' and self.environment == 'production':
-            errors.append("WARNING: Using local key encryption in production! Use KMS instead.")
-        
-        # Check KMS key ID if using KMS
-        if encryption == 'kms':
-            kms_key = self.get_str('aws_kms_key_id', '').strip()
-            if not kms_key:
-                errors.append("aws_kms_key_id not set but private_key_encryption=kms")
-        
+
         # Check principals limit
         max_principals = self.get_int('max_principals_per_cert')
         if max_principals > 256:
             errors.append(f"max_principals_per_cert ({max_principals}) exceeds SSH limit of 256")
-        
+
+        # Check ca_key_path is set
+        if not self.get_str('ca_key_path', '').strip():
+            errors.append("ca_key_path is not set")
+
         return errors
 
     def to_dict(self) -> dict:

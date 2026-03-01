@@ -1,6 +1,7 @@
 """Authentication endpoints."""
 import json
-from flask import request, session, g, jsonify
+import logging
+from flask import request, session, g, jsonify, current_app
 from marshmallow import ValidationError
 from gatehouse_app.api.v1 import api_v1_bp
 from gatehouse_app.utils.response import api_response
@@ -23,6 +24,7 @@ from gatehouse_app.services.auth_service import AuthService
 from gatehouse_app.services.webauthn_service import WebAuthnService
 from gatehouse_app.services.user_service import UserService
 from gatehouse_app.services.mfa_policy_service import MfaPolicyService
+from gatehouse_app.services.notification_service import NotificationService
 from gatehouse_app.utils.decorators import login_required
 from gatehouse_app.utils.constants import AuditAction
 from gatehouse_app.exceptions.auth_exceptions import InvalidCredentialsError
@@ -56,6 +58,23 @@ def register():
             password=data["password"],
             full_name=data.get("full_name"),
         )
+
+        # Send verification email
+        try:
+            from gatehouse_app.models import EmailVerificationToken
+            verify_token = EmailVerificationToken.generate(user_id=user.id)
+            app_url = current_app.config.get("APP_URL", "http://localhost:8080")
+            verify_link = f"{app_url}/verify-email?token={verify_token.token}"
+            subject = "Verify your Gatehouse email address"
+            body = (
+                f"Hi {user.full_name or user.email},\n\n"
+                f"Welcome to Gatehouse! Please verify your email address by clicking the link below (valid for 24 hours):\n"
+                f"{verify_link}\n\n"
+                f"Gatehouse Security Team"
+            )
+            NotificationService._send_email(to_address=user.email, subject=subject, body=body)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(f"Failed to send verification email on register: {exc}")
 
         # Create session
         user_session = AuthService.create_session(user)
@@ -179,7 +198,9 @@ def login():
                         "organization_id": org.organization_id,
                         "organization_name": org.organization_name,
                         "status": org.status,
+                        "effective_mode": org.effective_mode,
                         "deadline_at": org.deadline_at,
+                        "applied_at": org.applied_at,
                     }
                     for org in policy_result.compliance_summary.orgs
                 ],
@@ -284,7 +305,7 @@ def revoke_session(session_id):
         401: Not authenticated
         404: Session not found
     """
-    from gatehouse_app.models.session import Session
+    from gatehouse_app.models.user.session import Session
 
     # Ensure session belongs to current user
     user_session = Session.query.filter_by(
@@ -424,7 +445,7 @@ def verify_totp():
             )
 
         # Get user from database
-        from gatehouse_app.models.user import User
+        from gatehouse_app.models.user.user import User
         user = User.query.get(user_id)
         if not user:
             return api_response(
@@ -475,7 +496,9 @@ def verify_totp():
                         "organization_id": org.organization_id,
                         "organization_name": org.organization_name,
                         "status": org.status,
+                        "effective_mode": org.effective_mode,
                         "deadline_at": org.deadline_at,
+                        "applied_at": org.applied_at,
                     }
                     for org in policy_result.compliance_summary.orgs
                 ],
@@ -806,7 +829,7 @@ def begin_webauthn_login():
         data = schema.load(request.json)
         
         # Find user by email
-        from gatehouse_app.models.user import User
+        from gatehouse_app.models.user.user import User
         user = User.query.filter_by(
             email=data["email"].lower(),
             deleted_at=None
@@ -893,7 +916,7 @@ def complete_webauthn_login():
         data = schema.load(request.json)
         
         # Get user from database
-        from gatehouse_app.models.user import User
+        from gatehouse_app.models.user.user import User
         user = User.query.get(user_id)
         if not user:
             logger.error(f"WebAuthn login complete - user not found: {user_id}")
@@ -962,7 +985,9 @@ def complete_webauthn_login():
                         "organization_id": org.organization_id,
                         "organization_name": org.organization_name,
                         "status": org.status,
+                        "effective_mode": org.effective_mode,
                         "deadline_at": org.deadline_at,
+                        "applied_at": org.applied_at,
                     }
                     for org in policy_result.compliance_summary.orgs
                 ],
@@ -1142,3 +1167,381 @@ def get_webauthn_status():
         },
         message="WebAuthn status retrieved successfully",
     )
+
+
+_pw_logger = logging.getLogger(__name__)
+
+
+@api_v1_bp.route("/auth/forgot-password", methods=["POST"])
+def forgot_password():
+    """Request a password reset email.
+
+    Always returns 200 to avoid leaking account existence.
+
+    Request body:
+        email: User email address
+
+    Returns:
+        200: Password reset email sent (or silently no-op if email not found)
+    """
+    from gatehouse_app.models import User, PasswordResetToken
+
+    data = request.get_json() or {}
+    email = (data.get("email") or "").strip().lower()
+
+    if not email:
+        return api_response(
+            success=False,
+            message="Email is required",
+            status=400,
+            error_type="VALIDATION_ERROR",
+        )
+
+    # Always return 200 — don't leak whether the email exists
+    user = User.query.filter_by(email=email, deleted_at=None).first()
+    if user:
+        try:
+            reset_token = PasswordResetToken.generate(user_id=user.id)
+            app_url = current_app.config.get("APP_URL", "http://localhost:8080")
+            reset_link = f"{app_url}/reset-password?token={reset_token.token}"
+            subject = "Reset your Gatehouse password"
+            body = (
+                f"Hi {user.full_name or user.email},\n\n"
+                f"You requested a password reset for your Gatehouse account.\n\n"
+                f"Click the link below to reset your password (valid for 2 hours):\n"
+                f"{reset_link}\n\n"
+                f"If you did not request this, you can safely ignore this email.\n\n"
+                f"Gatehouse Security Team"
+            )
+            NotificationService._send_email(
+                to_address=user.email,
+                subject=subject,
+                body=body,
+            )
+            _pw_logger.info(f"Password reset token generated for user {user.id}")
+        except Exception as exc:
+            _pw_logger.exception(f"Error generating password reset token: {exc}")
+
+    return api_response(
+        data={},
+        message="If an account exists for this email, you will receive a password reset link shortly.",
+    )
+
+
+@api_v1_bp.route("/auth/reset-password", methods=["POST"])
+def reset_password():
+    """Reset a user's password using a reset token.
+
+    Request body:
+        token: Password reset token from email
+        password: New password
+        password_confirm: Password confirmation
+
+    Returns:
+        200: Password reset successfully
+        400: Invalid or expired token / validation error
+    """
+    import bcrypt as _bcrypt
+    from gatehouse_app.extensions import bcrypt
+    from gatehouse_app.models import PasswordResetToken, AuthenticationMethod
+    from gatehouse_app.utils.constants import AuthMethodType
+
+    data = request.get_json() or {}
+    token_value = (data.get("token") or "").strip()
+    new_password = data.get("password") or ""
+    password_confirm = data.get("password_confirm") or ""
+
+    if not token_value or not new_password:
+        return api_response(
+            success=False,
+            message="Token and new password are required",
+            status=400,
+            error_type="VALIDATION_ERROR",
+        )
+
+    if new_password != password_confirm:
+        return api_response(
+            success=False,
+            message="Passwords do not match",
+            status=400,
+            error_type="VALIDATION_ERROR",
+        )
+
+    if len(new_password) < 8:
+        return api_response(
+            success=False,
+            message="Password must be at least 8 characters",
+            status=400,
+            error_type="VALIDATION_ERROR",
+        )
+
+    reset_token = PasswordResetToken.query.filter_by(token=token_value).first()
+    if not reset_token or not reset_token.is_valid:
+        return api_response(
+            success=False,
+            message="This password reset link is invalid or has expired.",
+            status=400,
+            error_type="INVALID_TOKEN",
+        )
+
+    try:
+        user = reset_token.user
+        # Update the password hash on the authentication method
+        auth_method = AuthenticationMethod.query.filter_by(
+            user_id=user.id,
+            method_type=AuthMethodType.PASSWORD,
+            deleted_at=None,
+        ).first()
+        if auth_method:
+            auth_method.password_hash = bcrypt.generate_password_hash(new_password).decode("utf-8")
+            from gatehouse_app.extensions import db
+            db.session.add(auth_method)
+
+        reset_token.consume()
+        _pw_logger.info(f"Password reset for user {user.id}")
+
+        return api_response(
+            data={},
+            message="Your password has been reset. You can now sign in with your new password.",
+        )
+    except Exception as exc:
+        _pw_logger.exception(f"Error resetting password: {exc}")
+        return api_response(
+            success=False,
+            message="An error occurred while resetting your password.",
+            status=500,
+            error_type="INTERNAL_ERROR",
+        )
+
+
+@api_v1_bp.route("/auth/verify-email", methods=["POST"])
+def verify_email():
+    """Verify a user's email address using a verification token.
+
+    Request body:
+        token: Email verification token
+
+    Returns:
+        200: Email verified successfully
+        400: Invalid or expired token
+    """
+    from gatehouse_app.models import EmailVerificationToken
+
+    data = request.get_json() or {}
+    token_value = (data.get("token") or "").strip()
+
+    if not token_value:
+        return api_response(
+            success=False,
+            message="Verification token is required",
+            status=400,
+            error_type="VALIDATION_ERROR",
+        )
+
+    verify_token = EmailVerificationToken.query.filter_by(token=token_value).first()
+    if not verify_token or not verify_token.is_valid:
+        return api_response(
+            success=False,
+            message="This verification link is invalid or has expired.",
+            status=400,
+            error_type="INVALID_TOKEN",
+        )
+
+    try:
+        user = verify_token.user
+        user.email_verified = True
+        from gatehouse_app.extensions import db
+        db.session.add(user)
+        verify_token.consume()
+        _pw_logger.info(f"Email verified for user {user.id}")
+
+        return api_response(
+            data={},
+            message="Your email has been verified. You can now sign in.",
+        )
+    except Exception as exc:
+        _pw_logger.exception(f"Error verifying email: {exc}")
+        return api_response(
+            success=False,
+            message="An error occurred while verifying your email.",
+            status=500,
+            error_type="INTERNAL_ERROR",
+        )
+
+
+@api_v1_bp.route("/auth/resend-verification", methods=["POST"])
+def resend_verification():
+    """Resend email verification link.
+
+    Always returns 200 to avoid leaking account existence.
+
+    Request body:
+        email: User email address
+
+    Returns:
+        200: Verification email sent (or silently no-op)
+    """
+    from gatehouse_app.models import User, EmailVerificationToken
+
+    data = request.get_json() or {}
+    email = (data.get("email") or "").strip().lower()
+
+    if not email:
+        return api_response(
+            success=False,
+            message="Email is required",
+            status=400,
+            error_type="VALIDATION_ERROR",
+        )
+
+    user = User.query.filter_by(email=email, deleted_at=None).first()
+    if user and not user.email_verified:
+        try:
+            verify_token = EmailVerificationToken.generate(user_id=user.id)
+            app_url = current_app.config.get("APP_URL", "http://localhost:8080")
+            verify_link = f"{app_url}/verify-email?token={verify_token.token}"
+            subject = "Verify your Gatehouse email address"
+            body = (
+                f"Hi {user.full_name or user.email},\n\n"
+                f"Please verify your email address by clicking the link below (valid for 24 hours):\n"
+                f"{verify_link}\n\n"
+                f"Gatehouse Security Team"
+            )
+            NotificationService._send_email(
+                to_address=user.email,
+                subject=subject,
+                body=body,
+            )
+            _pw_logger.info(f"Verification email sent for user {user.id}")
+        except Exception as exc:
+            _pw_logger.exception(f"Error sending verification email: {exc}")
+
+    return api_response(
+        data={},
+        message="If an account exists for this email and is not yet verified, you will receive a verification link shortly.",
+    )
+
+
+# =============================================================================
+# Account Activation (separate from email-verification)
+# =============================================================================
+
+@api_v1_bp.route("/auth/activate", methods=["POST"])
+def activate_account():
+    """Activate a user account via a one-time activation code.
+
+    Request body:
+        code  – the activation_key from the welcome email
+
+    Returns:
+        200: Account activated, session token returned
+        400: Missing code
+        404: Invalid or already-used code
+    """
+    import secrets
+    from gatehouse_app.models.user.user import User
+    from gatehouse_app.extensions import db
+
+    data = request.get_json() or {}
+    code = (data.get("code") or "").strip()
+    if not code:
+        return api_response(success=False, message="Activation code is required", status=400, error_type="VALIDATION_ERROR")
+
+    user = User.query.filter_by(activation_key=code, deleted_at=None).first()
+    if not user:
+        return api_response(success=False, message="Invalid or expired activation code", status=404, error_type="NOT_FOUND")
+
+    user.activated = True
+    user.activation_key = None  # one-time use
+    db.session.add(user)
+    db.session.commit()
+
+    user_session = AuthService.create_session(user)
+    _pw_logger.info(f"Account activated for user {user.id}")
+
+    return api_response(
+        data={
+            "user": user.to_dict(),
+            "token": user_session.token,
+            "expires_at": user_session.expires_at.isoformat() + "Z"
+            if user_session.expires_at.isoformat()[-1] != "Z"
+            else user_session.expires_at.isoformat(),
+        },
+        message="Account activated successfully",
+    )
+
+
+@api_v1_bp.route("/auth/resend-activation", methods=["POST"])
+def resend_activation():
+    """Re-send an account activation email.
+
+    Always returns 200 to avoid leaking whether an account exists.
+
+    Request body:
+        email – user email address
+    """
+    import secrets
+    from gatehouse_app.models.user.user import User
+    from gatehouse_app.extensions import db
+
+    data = request.get_json() or {}
+    email = (data.get("email") or "").strip().lower()
+    if not email:
+        return api_response(success=False, message="Email is required", status=400, error_type="VALIDATION_ERROR")
+
+    user = User.query.filter_by(email=email, deleted_at=None).first()
+    if user and not user.activated:
+        try:
+            code = secrets.token_urlsafe(32)
+            user.activation_key = code
+            db.session.add(user)
+            db.session.commit()
+
+            app_url = current_app.config.get("APP_URL", current_app.config.get("FRONTEND_URL", "http://localhost:8080"))
+            activate_link = f"{app_url}/activate?code={code}"
+            subject = "Activate your Gatehouse account"
+            body = (
+                f"Hi {user.full_name or user.email},\n\n"
+                f"Please activate your Gatehouse account by clicking the link below:\n"
+                f"{activate_link}\n\n"
+                f"If you did not create an account, you can safely ignore this email.\n\n"
+                f"Gatehouse Security Team"
+            )
+            NotificationService._send_email(to_address=user.email, subject=subject, body=body)
+            _pw_logger.info(f"Activation email re-sent to {user.id}")
+        except Exception as exc:
+            _pw_logger.exception(f"Error re-sending activation email: {exc}")
+
+    return api_response(
+        data={},
+        message="If an unactivated account exists for this email, you will receive a new activation link shortly.",
+    )
+
+
+# =============================================================================
+# Token retrieval / redirect (for CLI / external tools)
+# =============================================================================
+
+@api_v1_bp.route("/auth/token", methods=["GET"])
+@login_required
+def get_token():
+    """Return the current session token, optionally redirecting to a URL.
+
+    Query parameters:
+        redirect  – optional URL to redirect to with the token appended as
+                    a query param: ``<redirect>?token=<token>``
+
+    Returns:
+        200: JSON ``{"token": "<token>"}``  (no redirect given)
+        302: Redirect to ``<redirect>?token=<token>``
+    """
+    from flask import redirect as flask_redirect
+
+    token = g.current_session.token
+    redirect_url = request.args.get("redirect", "").strip()
+
+    if redirect_url:
+        sep = "&" if "?" in redirect_url else "?"
+        return flask_redirect(f"{redirect_url}{sep}token={token}", code=302)
+
+    return api_response(data={"token": token}, message="Token retrieved")

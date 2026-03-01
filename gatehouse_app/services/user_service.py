@@ -2,7 +2,7 @@
 import logging
 from flask import current_app
 from gatehouse_app.extensions import db
-from gatehouse_app.models.user import User
+from gatehouse_app.models.user.user import User
 from gatehouse_app.exceptions.validation_exceptions import UserNotFoundError
 from gatehouse_app.utils.constants import AuditAction
 from gatehouse_app.services.audit_service import AuditService

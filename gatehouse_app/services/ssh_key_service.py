@@ -291,6 +291,8 @@ class SSHKeyService:
             logger.info(f"SSH key verified: {key_id}")
             return True
         
+        except SSHKeyError:
+            raise
         except Exception as e:
             logger.error(f"SSH key verification failed: {str(e)}")
             raise SSHKeyError(f"Signature verification failed: {str(e)}")

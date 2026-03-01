@@ -61,6 +61,8 @@ class AuditAction(str, Enum):
     USER_REGISTER = "user.register"
     USER_UPDATE = "user.update"
     USER_DELETE = "user.delete"
+    USER_SUSPEND = "user.suspend"
+    USER_UNSUSPEND = "user.unsuspend"
     PASSWORD_CHANGE = "user.password_change"
     PASSWORD_RESET = "user.password_reset"
 

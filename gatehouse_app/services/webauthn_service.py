@@ -10,8 +10,8 @@ from flask import current_app
 from sqlalchemy.orm.attributes import flag_modified
 
 from gatehouse_app.extensions import db, redis_client
-from gatehouse_app.models.user import User
-from gatehouse_app.models.authentication_method import AuthenticationMethod
+from gatehouse_app.models.user.user import User
+from gatehouse_app.models.auth.authentication_method import AuthenticationMethod
 from gatehouse_app.utils.constants import AuthMethodType, AuditAction
 from gatehouse_app.exceptions.auth_exceptions import InvalidCredentialsError
 from gatehouse_app.services.audit_service import AuditService

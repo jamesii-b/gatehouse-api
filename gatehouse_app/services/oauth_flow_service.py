@@ -9,9 +9,9 @@ from flask import current_app, request, g, redirect
 
 from gatehouse_app.extensions import db
 from gatehouse_app.models import User, AuthenticationMethod
-from gatehouse_app.models.authentication_method import OAuthState
+from gatehouse_app.models.auth.authentication_method import OAuthState
 from gatehouse_app.models.base import BaseModel
-from gatehouse_app.models.oidc_authorization_code import OIDCAuthCode
+from gatehouse_app.models.oidc.oidc_authorization_code import OIDCAuthCode
 from gatehouse_app.utils.constants import AuthMethodType, AuditAction
 from gatehouse_app.services.audit_service import AuditService
 from gatehouse_app.services.external_auth_service import (
@@ -776,7 +776,7 @@ class OAuthFlowService:
 
             # If organization_id hint was provided and valid, create session for that org
             if state_record.organization_id:
-                from gatehouse_app.models.organization import Organization
+                from gatehouse_app.models.organization.organization import Organization
                 org = Organization.query.get(state_record.organization_id)
                 if org:
                     from gatehouse_app.services.auth_service import AuthService
@@ -987,8 +987,8 @@ class OAuthFlowService:
             )
         
         # Determine organization
-        from gatehouse_app.models.organization import Organization
-        from gatehouse_app.models.organization_member import OrganizationMember
+        from gatehouse_app.models.organization.organization import Organization
+        from gatehouse_app.models.organization.organization_member import OrganizationMember
         
         # Get user's organizations
         user_orgs = user.get_organizations()

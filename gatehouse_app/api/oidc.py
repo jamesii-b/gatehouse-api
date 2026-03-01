@@ -21,7 +21,7 @@ from gatehouse_app.extensions import db
 from gatehouse_app.extensions import bcrypt as flask_bcrypt
 from gatehouse_app.extensions import redis_client as _redis_client_ref  # may be None until app init
 from gatehouse_app.models import User, OIDCClient
-from gatehouse_app.models.organization import Organization
+from gatehouse_app.models.organization.organization import Organization
 from gatehouse_app.exceptions.auth_exceptions import InvalidCredentialsError
 
 # ---------------------------------------------------------------------------
@@ -326,7 +326,7 @@ def oidc_complete():
         400: invalid request
         401: invalid token
     """
-    from gatehouse_app.models.session import Session as GHSession
+    from gatehouse_app.models.user.session import Session as GHSession
     from gatehouse_app.utils.constants import SessionStatus
 
     data = request.get_json(silent=True) or {}

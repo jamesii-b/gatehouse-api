@@ -8,7 +8,7 @@ from flask import current_app
 
 from gatehouse_app.extensions import db
 from gatehouse_app.models import User, AuthenticationMethod
-from gatehouse_app.models.authentication_method import (
+from gatehouse_app.models.auth.authentication_method import (
     OAuthState,
     ApplicationProviderConfig,
     OrganizationProviderOverride
@@ -1210,12 +1210,35 @@ class ExternalAuthService:
         else:
             email_verified = data.get("email_verified", False)
 
+        sub = data.get("sub")
+
+        # Derive email from sub when the provider omits the email claim.
+        # This happens with some OIDC servers (including the nav-security mock)
+        # that only return the minimal {sub, iss, iat, exp} set.
+        # Rule: if sub looks like an email address, use it directly.
+        #       Otherwise, construct a deterministic fallback so we never get NULL.
+        raw_email = data.get("email")
+        if not raw_email and sub:
+            import re as _re
+            if _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", sub):
+                raw_email = sub
+                email_verified = True  # if sub IS the email it's already verified
+            else:
+                # e.g. "12345" → "12345@google.local" so we can store it
+                raw_email = f"{sub}@{provider or 'oauth'}.local"
+                email_verified = False
+
+        # Derive display name when omitted
+        raw_name = data.get("name") or data.get("display_name")
+        if not raw_name and raw_email:
+            raw_name = raw_email.split("@")[0]
+
         # Standardize user info
         return {
-            "provider_user_id": data.get("sub"),
-            "email": data.get("email"),
+            "provider_user_id": sub,
+            "email": raw_email,
             "email_verified": email_verified,
-            "name": data.get("name"),
+            "name": raw_name,
             "first_name": data.get("given_name"),
             "last_name": data.get("family_name"),
             "picture": data.get("picture"),

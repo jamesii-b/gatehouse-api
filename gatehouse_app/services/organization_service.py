@@ -3,8 +3,8 @@ import logging
 from datetime import datetime, timezone
 from flask import current_app
 from gatehouse_app.extensions import db
-from gatehouse_app.models.organization import Organization
-from gatehouse_app.models.organization_member import OrganizationMember
+from gatehouse_app.models.organization.organization import Organization
+from gatehouse_app.models.organization.organization_member import OrganizationMember
 from gatehouse_app.exceptions.validation_exceptions import OrganizationNotFoundError, ConflictError
 from gatehouse_app.utils.constants import OrganizationRole, AuditAction
 from gatehouse_app.services.audit_service import AuditService

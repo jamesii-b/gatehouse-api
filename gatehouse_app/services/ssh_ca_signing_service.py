@@ -253,12 +253,13 @@ class SSHCASigningService:
             certificate.fields.valid_after = now
             certificate.fields.valid_before = valid_before
             
-            # Set extensions
+            # Set extensions — prefer policy-provided list, fall back to standard set
             extensions = signing_request.extensions
-            if not extensions and self.config.get_bool('extensions_enabled'):
-                extensions = self.config.get_list('extensions')
-            
-            certificate.fields.extensions = extensions or []
+            if not extensions:
+                from gatehouse_app.models.organization.department_cert_policy import STANDARD_EXTENSIONS
+                extensions = list(STANDARD_EXTENSIONS)
+
+            certificate.fields.extensions = extensions
             certificate.fields.critical_options = signing_request.critical_options or {}
             
             # Validate certificate before signing

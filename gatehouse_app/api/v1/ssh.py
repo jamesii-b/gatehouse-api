@@ -30,7 +30,7 @@ ssh_ca_service = SSHCASigningService()
 def _get_org_ca_for_user(user):
     """Return the active DB CA for the user's first org, or None."""
     try:
-        from gatehouse_app.models.ca import CA
+        from gatehouse_app.models.ssh_ca.ca import CA
         org_ids = [m.organization_id for m in user.organization_memberships]
         if not org_ids:
             return None
@@ -51,7 +51,7 @@ def _get_or_create_system_ca():
     The record is created on first use and has no ``organization_id``.
     """
     from gatehouse_app.extensions import db
-    from gatehouse_app.models.ca import CA, KeyType
+    from gatehouse_app.models.ssh_ca.ca import CA, KeyType
     from gatehouse_app.config.ssh_ca_config import get_ssh_ca_config
     from gatehouse_app.utils.crypto import compute_ssh_fingerprint
     import os
@@ -132,8 +132,8 @@ def _persist_certificate(user_id, ssh_key_id, ca, signing_response, request_ip=N
 
     try:
         from gatehouse_app.extensions import db
-        from gatehouse_app.models.ssh_certificate import SSHCertificate, CertificateStatus
-        from gatehouse_app.models.ca import CertType
+        from gatehouse_app.models.ssh_ca.ssh_certificate import SSHCertificate, CertificateStatus
+        from gatehouse_app.models.ssh_ca.ca import CertType
 
         try:
             resolved_cert_type = CertType(cert_type_str)
@@ -170,6 +170,87 @@ def _persist_certificate(user_id, ssh_key_id, ca, signing_response, request_ip=N
             pass
         return None
 
+
+
+def _get_merged_dept_cert_policy(user_id):
+    """Return a merged cert policy view for the given user across all their departments.
+
+    Rules for merging when a user belongs to multiple departments:
+    - ``allow_user_expiry``: True only if ALL departments allow it.
+    - ``default_expiry_hours``: minimum across departments (most restrictive).
+    - ``max_expiry_hours``: minimum across departments (most restrictive).
+    - ``extensions``: intersection — only extensions allowed by ALL departments.
+
+    Returns a plain dict with keys:
+        allow_user_expiry, default_expiry_hours, max_expiry_hours, extensions
+    Or None if the user has no department memberships or no policies are configured.
+    """
+    from gatehouse_app.models.organization.department import DepartmentMembership
+    from gatehouse_app.models.organization.department_cert_policy import DepartmentCertPolicy, STANDARD_EXTENSIONS
+
+    memberships = DepartmentMembership.query.filter_by(user_id=user_id, deleted_at=None).all()
+    dept_ids = [m.department_id for m in memberships if m.department and m.department.deleted_at is None]
+    if not dept_ids:
+        return None
+
+    policies = DepartmentCertPolicy.query.filter(
+        DepartmentCertPolicy.department_id.in_(dept_ids),
+        DepartmentCertPolicy.deleted_at.is_(None),
+    ).all()
+    if not policies:
+        return None
+
+    allow_user_expiry = all(p.allow_user_expiry for p in policies)
+    default_expiry_hours = min(p.default_expiry_hours for p in policies)
+    max_expiry_hours = min(p.max_expiry_hours for p in policies)
+
+    # Intersection of all_extensions() across policies
+    ext_sets = [set(p.all_extensions()) for p in policies]
+    extensions = list(ext_sets[0].intersection(*ext_sets[1:]))
+
+    return {
+        "allow_user_expiry": allow_user_expiry,
+        "default_expiry_hours": default_expiry_hours,
+        "max_expiry_hours": max_expiry_hours,
+        "extensions": extensions,
+    }
+
+
+@ssh_bp.route('/dept-cert-policy', methods=['GET'])
+@login_required
+def get_my_dept_cert_policy():
+    """Return the merged department certificate policy for the current user.
+
+    Admins always get allow_user_expiry=True so the frontend shows the expiry
+    picker for them regardless of the member-facing toggle setting.
+    """
+    from gatehouse_app.models.organization.organization_member import OrganizationMember
+    from gatehouse_app.models.organization.department_cert_policy import STANDARD_EXTENSIONS
+    from gatehouse_app.utils.constants import OrganizationRole
+
+    user = g.current_user
+    user_id = user.id
+
+    # Check if caller is an org admin/owner
+    is_org_admin = OrganizationMember.query.filter(
+        OrganizationMember.user_id == user_id,
+        OrganizationMember.role.in_(["OWNER", "ADMIN"]),
+        OrganizationMember.deleted_at == None,
+    ).first() is not None
+
+    policy = _get_merged_dept_cert_policy(user_id)
+    if policy is None:
+        policy = {
+            "allow_user_expiry": is_org_admin,  # admins default to True even without a dept policy
+            "default_expiry_hours": 1,
+            "max_expiry_hours": 24,
+            "extensions": list(STANDARD_EXTENSIONS),
+        }
+    elif is_org_admin:
+        # Override allow_user_expiry for admins — they can always pick
+        policy = {**policy, "allow_user_expiry": True}
+
+    return api_response(data={"policy": policy}, message="Certificate policy retrieved")
 
 
 @ssh_bp.route('/keys', methods=['GET'])
@@ -375,6 +456,16 @@ def sign_certificate():
     user = g.current_user
     user_id = user.id
 
+    # ── Check account suspension ──────────────────────────────────────────────
+    from gatehouse_app.utils.constants import UserStatus
+    if user.status == UserStatus.SUSPENDED:
+        return api_response(
+            success=False,
+            message="Your account is suspended. Contact an administrator.",
+            status=403,
+            error_type="ACCOUNT_SUSPENDED",
+        )
+
     data = request.get_json()
     if not data:
         return api_response(success=False, message="No JSON data provided", status=400, error_type="BAD_REQUEST")
@@ -385,9 +476,9 @@ def sign_certificate():
     expiry_hours = data.get('expiry_hours')
 
     # ── Resolve which principals the user is allowed to use ──────────────────
-    from gatehouse_app.models.organization_member import OrganizationMember
-    from gatehouse_app.models.principal import Principal, PrincipalMembership
-    from gatehouse_app.models.department import DepartmentMembership, DepartmentPrincipal
+    from gatehouse_app.models.organization.organization_member import OrganizationMember
+    from gatehouse_app.models.organization.principal import Principal, PrincipalMembership
+    from gatehouse_app.models.organization.department import DepartmentMembership, DepartmentPrincipal
     from gatehouse_app.utils.constants import OrganizationRole
 
     allowed_principal_names = set()
@@ -468,12 +559,38 @@ def sign_certificate():
     db_ca = _get_org_ca_for_user(user)
     ca_private_key = db_ca.private_key if db_ca else None
 
+    # Determine if the caller is an org admin/owner (admins can always choose expiry)
+    is_org_admin = any(
+        om.role in (OrganizationRole.ADMIN, OrganizationRole.OWNER)
+        for om in memberships
+        if om.organization and om.organization.deleted_at is None
+    )
+
+    # ── Apply department certificate policy ───────────────────────────────────
+    dept_policy = _get_merged_dept_cert_policy(user_id)
+    if dept_policy:
+        if is_org_admin:
+            # Admins can always choose their own expiry, but still capped at dept max
+            if expiry_hours is not None:
+                expiry_hours = min(int(expiry_hours), dept_policy["max_expiry_hours"])
+        elif not dept_policy["allow_user_expiry"]:
+            # Regular members: ignore user-requested expiry; use dept default
+            expiry_hours = dept_policy["default_expiry_hours"]
+        else:
+            # Regular members allowed to pick, cap at dept maximum
+            if expiry_hours is not None:
+                expiry_hours = min(int(expiry_hours), dept_policy["max_expiry_hours"])
+        policy_extensions = dept_policy["extensions"]
+    else:
+        policy_extensions = None  # let signing service use its own defaults
+
     signing_request = SSHCertificateSigningRequest(
         ssh_public_key=ssh_key.payload,
         principals=principals,
         cert_type=cert_type,
         key_id=key_id,
         expiry_hours=int(expiry_hours) if expiry_hours else None,
+        extensions=policy_extensions,
     )
     validation_errors = signing_request.validate()
     if validation_errors:
@@ -547,7 +664,7 @@ def list_certificates():
     user_id = g.current_user.id
 
     try:
-        from gatehouse_app.models.ssh_certificate import SSHCertificate
+        from gatehouse_app.models.ssh_ca.ssh_certificate import SSHCertificate
         certs = (
             SSHCertificate.query
             .filter_by(user_id=user_id, deleted_at=None)
@@ -577,7 +694,7 @@ def get_certificate(cert_id):
     user_id = g.current_user.id
 
     try:
-        from gatehouse_app.models.ssh_certificate import SSHCertificate
+        from gatehouse_app.models.ssh_ca.ssh_certificate import SSHCertificate
         cert = SSHCertificate.query.filter_by(id=cert_id, deleted_at=None).first()
         if not cert:
             return api_response(success=False, message='Certificate not found', status=404, error_type='NOT_FOUND')
@@ -600,7 +717,7 @@ def revoke_certificate(cert_id):
     reason = data.get('reason', 'User requested revocation')
 
     try:
-        from gatehouse_app.models.ssh_certificate import SSHCertificate
+        from gatehouse_app.models.ssh_ca.ssh_certificate import SSHCertificate
         cert = SSHCertificate.query.filter_by(id=cert_id, deleted_at=None).first()
         if not cert:
             return api_response(success=False, message='Certificate not found', status=404, error_type='NOT_FOUND')

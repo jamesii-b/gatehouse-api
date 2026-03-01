@@ -1,6 +1,6 @@
 """Audit service."""
 from flask import request, g
-from gatehouse_app.models.audit_log import AuditLog
+from gatehouse_app.models.auth.audit_log import AuditLog
 from gatehouse_app.utils.constants import AuditAction
 
 

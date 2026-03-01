@@ -5,9 +5,9 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 from flask import request, g, current_app
 from gatehouse_app.extensions import db, bcrypt
-from gatehouse_app.models.user import User
-from gatehouse_app.models.authentication_method import AuthenticationMethod
-from gatehouse_app.models.session import Session
+from gatehouse_app.models.user.user import User
+from gatehouse_app.models.auth.authentication_method import AuthenticationMethod
+from gatehouse_app.models.user.session import Session
 from gatehouse_app.utils.constants import AuthMethodType, SessionStatus, UserStatus, AuditAction
 from gatehouse_app.exceptions.auth_exceptions import InvalidCredentialsError, AccountSuspendedError, AccountInactiveError
 from gatehouse_app.exceptions.validation_exceptions import EmailAlreadyExistsError

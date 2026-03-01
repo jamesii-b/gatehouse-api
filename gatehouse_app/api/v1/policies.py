@@ -195,20 +195,46 @@ def get_org_mfa_compliance(org_id):
 
     limit = min(int(request.args.get("limit", 100)), 100)
     offset = int(request.args.get("offset", 0))
+    page = int(request.args.get("page", 1))
+    page_size = min(int(request.args.get("page_size", limit)), 100)
+
+    effective_offset = offset if request.args.get("offset") else (page - 1) * page_size
 
     compliance_list = MfaPolicyService.get_org_compliance_list(
         organization_id=org_id,
         status=status,
-        limit=limit,
-        offset=offset,
+        limit=page_size,
+        offset=effective_offset,
     )
+
+    def format_member(c):
+        """Normalize compliance record to UI-expected shape."""
+        if isinstance(c, dict):
+            return {
+                "user_id": c.get("user_id"),
+                "user_email": c.get("email"),
+                "user_name": c.get("full_name"),
+                "status": c.get("status"),
+                "deadline_at": c.get("deadline_at"),
+                "compliant_at": c.get("compliant_at"),
+                "last_notified_at": c.get("notified_at"),
+            }
+        return {
+            "user_id": getattr(c, "user_id", None),
+            "user_email": getattr(c, "email", None),
+            "user_name": getattr(c, "full_name", None),
+            "status": getattr(c, "status", None),
+            "deadline_at": getattr(c, "deadline_at", None),
+            "compliant_at": getattr(c, "compliant_at", None),
+            "last_notified_at": getattr(c, "notified_at", None),
+        }
 
     return api_response(
         data={
-            "compliance": compliance_list,
+            "members": [format_member(c) for c in compliance_list],
             "count": len(compliance_list),
-            "limit": limit,
-            "offset": offset,
+            "page": page,
+            "page_size": page_size,
         },
         message="Compliance records retrieved successfully",
     )
@@ -325,12 +351,10 @@ def get_my_mfa_compliance():
 
     return api_response(
         data={
-            "mfa_compliance": {
-                "overall_status": compliance_summary.overall_status,
-                "missing_methods": compliance_summary.missing_methods,
-                "deadline_at": compliance_summary.deadline_at,
-                "orgs": orgs,
-            }
+            "overall_status": compliance_summary.overall_status,
+            "missing_methods": compliance_summary.missing_methods,
+            "deadline_at": compliance_summary.deadline_at,
+            "orgs": orgs,
         },
         message="MFA compliance retrieved successfully",
     )

@@ -458,12 +458,22 @@ def add_principal_member(org_id, principal_id):
                 error_type="CONFLICT",
             )
 
-        # Add member
-        membership = PrincipalMembership(
-            user_id=user.id,
-            principal_id=principal_id,
-        )
-        db.session.add(membership)
+        soft_deleted = PrincipalMembership.query.filter(
+            PrincipalMembership.user_id == user.id,
+            PrincipalMembership.principal_id == principal_id,
+            PrincipalMembership.deleted_at.isnot(None)
+        ).first()
+
+        if soft_deleted:
+            soft_deleted.deleted_at = None
+            membership = soft_deleted
+        else:
+            membership = PrincipalMembership(
+                user_id=user.id,
+                principal_id=principal_id,
+            )
+            db.session.add(membership)
+
         db.session.commit()
 
         member_dict = membership.to_dict()
@@ -665,7 +675,7 @@ def link_principal_to_department(org_id, principal_id, dept_id):
     soft_deleted = DepartmentPrincipal.query.filter(
         DepartmentPrincipal.department_id == dept_id,
         DepartmentPrincipal.principal_id == principal_id,
-        DepartmentPrincipal.deleted_at != None,  # noqa: E711
+        DepartmentPrincipal.deleted_at.isnot(None),
     ).first()
 
     try:
@@ -678,13 +688,8 @@ def link_principal_to_department(org_id, principal_id, dept_id):
             )
             db.session.add(link)
         db.session.commit()
-    except Exception as e:
+    except Exception:
         db.session.rollback()
-        from gatehouse_app.extensions import db as _db
-        try:
-            _db.session.rollback()
-        except Exception:
-            pass
         return api_response(
             success=False,
             message="Failed to link principal to department",
@@ -693,6 +698,10 @@ def link_principal_to_department(org_id, principal_id, dept_id):
         )
 
     return api_response(
+        data={
+            "principal": principal.to_dict(),
+            "department": dept.to_dict(),
+        },
         message="Principal linked to department successfully",
         status=201,
     )

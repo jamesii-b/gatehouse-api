@@ -61,6 +61,7 @@ class AuditAction(str, Enum):
     USER_REGISTER = "user.register"
     USER_UPDATE = "user.update"
     USER_DELETE = "user.delete"
+    USER_HARD_DELETE = "user.hard_delete"
     USER_SUSPEND = "user.suspend"
     USER_UNSUSPEND = "user.unsuspend"
     PASSWORD_CHANGE = "user.password_change"
@@ -73,6 +74,7 @@ class AuditAction(str, Enum):
     ORG_MEMBER_ADD = "org.member.add"
     ORG_MEMBER_REMOVE = "org.member.remove"
     ORG_MEMBER_ROLE_CHANGE = "org.member.role_change"
+    ORG_OWNERSHIP_TRANSFERRED = "org.ownership.transferred"
 
     # Session actions
     SESSION_CREATE = "session.create"

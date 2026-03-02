@@ -88,6 +88,11 @@ class CA(BaseModel):
     rotated_at = db.Column(db.DateTime, nullable=True)
     rotation_reason = db.Column(db.String(255), nullable=True)
 
+    # Monotonically-increasing serial counter.  Every cert this CA issues
+    # gets the next value so serials are unique, ordered, and auditable.
+    # Protected by a row-level SELECT … FOR UPDATE in get_next_serial().
+    next_serial_number = db.Column(db.BigInteger, default=1, nullable=False)
+
     # Relationships
     organization = db.relationship("Organization", back_populates="cas")
     certificates = db.relationship(
@@ -102,7 +107,6 @@ class CA(BaseModel):
     )
 
     __table_args__ = (
-        db.UniqueConstraint("organization_id", "name", name="uix_org_ca_name"),
         db.Index("idx_ca_org_active", "organization_id", "is_active"),
     )
 
@@ -161,6 +165,28 @@ class CA(BaseModel):
         self.rotated_at = datetime.now(timezone.utc)   # Bug fix: was datetime.utcnow()
         self.rotation_reason = reason
         self.save()
+
+    def get_next_serial(self) -> int:
+        """Atomically increment and return the next certificate serial number.
+
+        Uses a SELECT … FOR UPDATE row lock so concurrent requests never
+        receive the same serial.  Must be called inside an active DB
+        transaction (i.e. before the final session.commit()).
+
+        Returns:
+            int: The serial number to embed in the next certificate.
+        """
+        # Re-fetch this CA row with an exclusive row lock
+        locked = (
+            db.session.query(CA)
+            .with_for_update()
+            .filter_by(id=self.id)
+            .one()
+        )
+        serial = locked.next_serial_number
+        locked.next_serial_number = serial + 1
+        db.session.flush()   # write increment; commit happens in the caller
+        return serial
 
 
 class CAPermission(BaseModel):

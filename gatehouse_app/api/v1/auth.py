@@ -4,6 +4,7 @@ import logging
 from flask import request, session, g, jsonify, current_app
 from marshmallow import ValidationError
 from gatehouse_app.api.v1 import api_v1_bp
+from gatehouse_app.extensions import limiter
 from gatehouse_app.utils.response import api_response
 from gatehouse_app.schemas.auth_schema import (
     RegisterSchema,
@@ -32,6 +33,7 @@ from gatehouse_app.exceptions.validation_exceptions import ConflictError, NotFou
 
 
 @api_v1_bp.route("/auth/register", methods=["POST"])
+@limiter.limit(lambda: current_app.config["RATELIMIT_AUTH_REGISTER"])
 def register():
     """
     Register a new user.
@@ -135,6 +137,7 @@ def register():
 
 
 @api_v1_bp.route("/auth/login", methods=["POST"])
+@limiter.limit(lambda: current_app.config["RATELIMIT_AUTH_LOGIN"])
 def login():
     """
     Login user.
@@ -325,8 +328,13 @@ def get_current_user():
         data={
             "user": user.to_dict(),
             "organizations": [
-                {"id": org.id, "name": org.name, "slug": org.slug}
-                for org in user.get_organizations()
+                {
+                    "id": membership.organization.id,
+                    "name": membership.organization.name,
+                    "slug": membership.organization.slug,
+                    "role": membership.role,
+                }
+                for membership in user.organization_memberships
             ],
         },
         message="User retrieved successfully",
@@ -478,6 +486,7 @@ def verify_totp_enrollment():
 
 
 @api_v1_bp.route("/auth/totp/verify", methods=["POST"])
+@limiter.limit(lambda: current_app.config["RATELIMIT_AUTH_TOTP_VERIFY"])
 def verify_totp():
     """
     Verify TOTP code during login.
@@ -518,6 +527,18 @@ def verify_totp():
                 message="User not found",
                 status=401,
                 error_type="AUTHENTICATION_ERROR",
+            )
+
+        # Check account suspension before completing TOTP verification
+        from gatehouse_app.utils.constants import UserStatus
+        if user.status in (UserStatus.SUSPENDED, UserStatus.COMPLIANCE_SUSPENDED):
+            session.pop("totp_pending_user_id", None)
+            session.pop("webauthn_pending_user_id", None)
+            return api_response(
+                success=False,
+                message="Account is suspended. Contact an administrator.",
+                status=403,
+                error_type="ACCOUNT_SUSPENDED",
             )
 
         # Verify TOTP code
@@ -908,7 +929,18 @@ def begin_webauthn_login():
                 status=404,
                 error_type="NOT_FOUND",
             )
-        
+
+        # Check account suspension before proceeding
+        from gatehouse_app.utils.constants import UserStatus
+        if user.status in (UserStatus.SUSPENDED, UserStatus.COMPLIANCE_SUSPENDED):
+            logger.warning(f"WebAuthn login begin - suspended account attempt: {user.email}")
+            return api_response(
+                success=False,
+                message="Account is suspended. Contact an administrator.",
+                status=403,
+                error_type="ACCOUNT_SUSPENDED",
+            )
+
         # Check if user has any WebAuthn credentials
         if not user.has_webauthn_enabled():
             logger.warning(f"WebAuthn login begin - no credentials for user: {user.email}")
@@ -991,7 +1023,19 @@ def complete_webauthn_login():
                 status=401,
                 error_type="AUTHENTICATION_ERROR",
             )
-        
+
+        # Check account suspension before completing login
+        from gatehouse_app.utils.constants import UserStatus
+        if user.status in (UserStatus.SUSPENDED, UserStatus.COMPLIANCE_SUSPENDED):
+            session.pop("webauthn_pending_user_id", None)
+            logger.warning(f"WebAuthn login complete - suspended account attempt: {user.email}")
+            return api_response(
+                success=False,
+                message="Account is suspended. Contact an administrator.",
+                status=403,
+                error_type="ACCOUNT_SUSPENDED",
+            )
+
         # Extract challenge from client data
         client_data = data.get("response", {}).get("clientDataJSON", "")
         
@@ -1129,6 +1173,19 @@ def delete_webauthn_credential(credential_id):
     """
     user = g.current_user
     
+    # First check that the specific credential actually belongs to this user.
+    # Only then check whether it is the last one — otherwise a user with zero
+    # credentials gets a misleading "Cannot delete the last passkey" error
+    # instead of a 404.
+    credential_exists = WebAuthnService.credential_belongs_to_user(credential_id, user)
+    if not credential_exists:
+        return api_response(
+            success=False,
+            message="Credential not found",
+            status=404,
+            error_type="NOT_FOUND",
+        )
+
     # Check if this is the last credential
     credential_count = user.get_webauthn_credential_count()
     if credential_count <= 1:
@@ -1238,6 +1295,7 @@ _pw_logger = logging.getLogger(__name__)
 
 
 @api_v1_bp.route("/auth/forgot-password", methods=["POST"])
+@limiter.limit(lambda: current_app.config["RATELIMIT_AUTH_FORGOT_PASSWORD"])
 def forgot_password():
     """Request a password reset email.
 
@@ -1294,6 +1352,7 @@ def forgot_password():
 
 
 @api_v1_bp.route("/auth/reset-password", methods=["POST"])
+@limiter.limit(lambda: current_app.config["RATELIMIT_AUTH_RESET_PASSWORD"])
 def reset_password():
     """Reset a user's password using a reset token.
 
@@ -1601,11 +1660,31 @@ def get_token():
         302: Redirect to ``<redirect>?token=<token>``
     """
     from flask import redirect as flask_redirect
+    from urllib.parse import urlparse
 
     token = g.current_session.token
     redirect_url = request.args.get("redirect", "").strip()
 
     if redirect_url:
+        # Validate redirect URL against allowed origins to prevent open-redirect
+        # token exfiltration attacks (CWE-601).
+        allowed_origins = set(current_app.config.get("CORS_ORIGINS", []))
+        frontend_url = current_app.config.get("FRONTEND_URL", "")
+        if frontend_url:
+            parsed = urlparse(frontend_url)
+            allowed_origins.add(f"{parsed.scheme}://{parsed.netloc}")
+
+        parsed_redirect = urlparse(redirect_url)
+        redirect_origin = f"{parsed_redirect.scheme}://{parsed_redirect.netloc}"
+
+        if redirect_origin not in allowed_origins:
+            return api_response(
+                success=False,
+                message="Redirect URL is not allowed.",
+                status=400,
+                error_type="INVALID_REDIRECT",
+            )
+
         sep = "&" if "?" in redirect_url else "?"
         return flask_redirect(f"{redirect_url}{sep}token={token}", code=302)
 

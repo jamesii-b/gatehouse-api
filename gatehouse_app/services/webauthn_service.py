@@ -641,6 +641,26 @@ class WebAuthnService:
         )
         
         return True
+
+    @classmethod
+    def credential_belongs_to_user(cls, credential_id: str, user: User) -> bool:
+        """Check whether *credential_id* exists and belongs to *user*.
+
+        Args:
+            credential_id: The credential ID to look up
+            user: User instance
+
+        Returns:
+            True if the credential exists and belongs to this user, False otherwise.
+        """
+        auth_method = AuthenticationMethod.query.filter_by(
+            user_id=user.id,
+            method_type=AuthMethodType.WEBAUTHN,
+            deleted_at=None,
+        ).first()
+        if not auth_method or not auth_method.provider_data:
+            return False
+        return auth_method.provider_data.get("credential_id") == credential_id
     
     @classmethod
     def rename_credential(cls, credential_id: str, user: User, name: str) -> bool:

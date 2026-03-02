@@ -102,7 +102,7 @@ class AuthService:
         if current_app.config.get('ENV') == 'development':
             logger.debug(f"[Auth] Account status: user_id={user.id}, status={user.status}")
         
-        if user.status == UserStatus.SUSPENDED:
+        if user.status in (UserStatus.SUSPENDED, UserStatus.COMPLIANCE_SUSPENDED):
             raise AccountSuspendedError()
         if user.status == UserStatus.INACTIVE:
             raise AccountInactiveError()
@@ -208,6 +208,22 @@ class AuthService:
 
         # Update password
         auth_method.password_hash = bcrypt.generate_password_hash(new_password).decode("utf-8")
+        db.session.commit()
+
+        # Invalidate all other sessions so that if an attacker had a valid
+        # session token, changing the password actually locks them out.
+        # The current request's session (if any) is preserved so the user
+        # doesn't have to log in again immediately.
+        from flask import g as flask_g
+        current_session_id = getattr(flask_g, "current_session", None)
+        current_session_id = current_session_id.id if current_session_id else None
+        sessions_to_revoke = Session.query.filter(
+            Session.user_id == user.id,
+            Session.revoked_at == None,  # noqa: E711
+        ).all()
+        for sess in sessions_to_revoke:
+            if sess.id != current_session_id:
+                sess.revoke(reason="Password changed")
         db.session.commit()
 
         # Log password change
@@ -482,9 +498,24 @@ class AuthService:
             if not secret:
                 raise InvalidCredentialsError("TOTP secret not found")
 
+            # Replay-attack prevention: reject codes that have already been
+            # accepted within the current validity window.
+            if TOTPService.is_code_already_used(str(user.id), code):
+                AuditService.log_action(
+                    action=AuditAction.TOTP_VERIFY_FAILED,
+                    user_id=user.id,
+                    resource_type="authentication_method",
+                    resource_id=auth_method.id,
+                    description="TOTP code replay attempt detected",
+                )
+                raise InvalidCredentialsError("Invalid TOTP code")
+
             is_valid = TOTPService.verify_code(secret, code, client_utc_timestamp=client_utc_timestamp)
 
             if is_valid:
+                # Mark this code as used to prevent replay within the validity window
+                TOTPService.mark_code_used(str(user.id), code)
+
                 auth_method.last_used_at = datetime.now(timezone.utc)
                 db.session.commit()
 

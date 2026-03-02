@@ -73,11 +73,51 @@ def delete_me():
     """
     Delete current user account (soft delete).
 
+    Blocked if the user is the sole owner of any organization that has other
+    active members — they must transfer ownership or dissolve those organizations
+    first.
+
     Returns:
         200: Account deleted successfully
         401: Not authenticated
+        409: User is sole owner of one or more organizations with other members
     """
-    UserService.delete_user(g.current_user, soft=True)
+    from gatehouse_app.models.organization.organization_member import OrganizationMember
+    from gatehouse_app.utils.constants import OrganizationRole
+
+    user = g.current_user
+
+    # Find orgs where this user is the sole owner AND other members exist.
+    owned_memberships = OrganizationMember.query.filter_by(
+        user_id=user.id,
+        role=OrganizationRole.OWNER,
+        deleted_at=None,
+    ).all()
+
+    blocked_orgs = []
+    for membership in owned_memberships:
+        org = membership.organization
+        if org.deleted_at is not None:
+            continue
+        member_count = org.get_member_count()
+        if member_count > 1:
+            blocked_orgs.append(org.name)
+
+    if blocked_orgs:
+        names = ", ".join(f'"{n}"' for n in blocked_orgs)
+        return api_response(
+            success=False,
+            message=(
+                f"You are the sole owner of {len(blocked_orgs)} organization"
+                f"{'s' if len(blocked_orgs) > 1 else ''}: {names}. "
+                "Transfer ownership or delete those organizations before deleting your account."
+            ),
+            status=409,
+            error_type="USER_IS_SOLE_OWNER",
+            error_details={"organizations": blocked_orgs},
+        )
+
+    UserService.delete_user(user, soft=True)
 
     return api_response(
         message="Account deleted successfully",
@@ -454,6 +494,31 @@ def admin_suspend_user(user_id):
     if not admin_in_shared_org:
         return api_response(success=False, message="Access denied", status=403, error_type="AUTHORIZATION_ERROR")
 
+    # ── Owner protection ──────────────────────────────────────────────────────
+    # An org owner cannot be suspended until they transfer ownership.
+    from gatehouse_app.utils.constants import OrganizationRole
+    owner_memberships = OrganizationMember.query.filter(
+        OrganizationMember.user_id == target.id,
+        OrganizationMember.role == OrganizationRole.OWNER,
+        OrganizationMember.deleted_at == None,
+    ).all()
+    if owner_memberships:
+        org_names = [
+            m.organization.name
+            for m in owner_memberships
+            if m.organization and not m.organization.deleted_at
+        ]
+        return api_response(
+            success=False,
+            message=(
+                f"Cannot suspend an organization owner. "
+                f"{target.email} is the owner of: {', '.join(org_names)}. "
+                "Transfer ownership to another member first."
+            ),
+            status=403,
+            error_type="OWNER_PROTECTION",
+        )
+
     if target.status in (UserStatus.SUSPENDED, UserStatus.COMPLIANCE_SUSPENDED):
         return api_response(success=False, message="User is already suspended", status=409, error_type="CONFLICT")
 
@@ -644,4 +709,159 @@ def get_my_memberships():
     return api_response(
         data={"orgs": orgs_result},
         message="Memberships retrieved",
+    )
+
+
+@api_v1_bp.route("/admin/users/<user_id>/delete", methods=["POST"])
+@login_required
+@full_access_required
+def admin_hard_delete_user(user_id):
+    """Permanently delete a user and ALL associated data (hard delete, irreversible).
+
+    Required body: {"confirm": true}
+
+    Pre-conditions:
+      - Caller is OWNER or ADMIN of a shared org with the target.
+      - Cannot delete yourself.
+      - Target must not be the OWNER of any active organization (transfer first).
+
+    Side-effects:
+      - All active SSH certificates are revoked before deletion.
+      - The user row and all cascaded rows are hard-deleted from the database.
+      - An audit log entry is written by the *caller* (so it is not lost with the user).
+    """
+    from gatehouse_app.models.organization.organization_member import OrganizationMember
+    from gatehouse_app.models.user.user import User as _User
+    from gatehouse_app.extensions import db as _db
+    from gatehouse_app.utils.constants import UserStatus, AuditAction, OrganizationRole
+    from gatehouse_app.services.audit_service import AuditService
+
+    caller = g.current_user
+    data = request.get_json() or {}
+
+    if not data.get("confirm"):
+        return api_response(
+            success=False,
+            message="Deletion requires explicit confirmation. Send {\"confirm\": true} to proceed.",
+            status=400,
+            error_type="CONFIRMATION_REQUIRED",
+        )
+
+    target = _User.query.filter_by(id=user_id).first()
+    if not target:
+        return api_response(success=False, message="User not found", status=404, error_type="NOT_FOUND")
+
+    if target.id == caller.id:
+        return api_response(
+            success=False,
+            message="Cannot delete your own account via this endpoint.",
+            status=400,
+            error_type="BAD_REQUEST",
+        )
+
+    # Caller must be OWNER/ADMIN of a shared org.
+    # Include soft-deleted memberships so that already-soft-deleted users can
+    # still be hard-deleted by an admin who shared an org with them.
+    target_org_ids = {m.organization_id for m in target.organization_memberships}
+    admin_in_shared_org = OrganizationMember.query.filter(
+        OrganizationMember.user_id == caller.id,
+        OrganizationMember.organization_id.in_(target_org_ids),
+        OrganizationMember.role.in_(["OWNER", "ADMIN"]),
+        OrganizationMember.deleted_at == None,
+    ).first()
+    if not admin_in_shared_org:
+        return api_response(success=False, message="Access denied", status=403, error_type="AUTHORIZATION_ERROR")
+
+    # Block deletion if target is an org owner — they must transfer first
+    owner_memberships = OrganizationMember.query.filter(
+        OrganizationMember.user_id == target.id,
+        OrganizationMember.role == OrganizationRole.OWNER,
+        OrganizationMember.deleted_at == None,
+    ).all()
+    if owner_memberships:
+        org_names = [
+            m.organization.name
+            for m in owner_memberships
+            if m.organization and not m.organization.deleted_at
+        ]
+        return api_response(
+            success=False,
+            message=(
+                f"Cannot delete an organization owner. "
+                f"{target.email} is the owner of: {', '.join(org_names)}. "
+                "Transfer ownership to another member first."
+            ),
+            status=403,
+            error_type="OWNER_PROTECTION",
+        )
+
+    # ── Collect counts for audit metadata ────────────────────────────────────
+    from gatehouse_app.models.ssh_ca.ssh_key import SSHKey
+    from gatehouse_app.models.ssh_ca.ssh_certificate import SSHCertificate, CertificateStatus
+
+    ssh_key_count = SSHKey.query.filter_by(user_id=target.id, deleted_at=None).count()
+    active_cert_count = SSHCertificate.query.filter_by(
+        user_id=target.id, revoked=False
+    ).filter(SSHCertificate.deleted_at == None).count()
+
+    # ── Revoke all active SSH certificates before deletion ───────────────────
+    active_certs = SSHCertificate.query.filter_by(
+        user_id=target.id, revoked=False
+    ).filter(SSHCertificate.deleted_at == None).all()
+    for cert in active_certs:
+        try:
+            cert.revoke("account_deleted")
+        except Exception:
+            pass
+
+    if active_certs:
+        try:
+            _db.session.flush()
+        except Exception:
+            pass
+
+    # ── Hard delete ───────────────────────────────────────────────────────────
+    target_email = target.email          # capture before deletion
+    target_id_str = str(target.id)
+
+    try:
+        _db.session.delete(target)       # cascades to all child tables
+        _db.session.flush()
+    except Exception as exc:
+        _db.session.rollback()
+        import logging
+        logging.getLogger(__name__).error(f"Hard delete failed for {target_id_str}: {exc}")
+        return api_response(
+            success=False,
+            message="Failed to delete user account. Please try again.",
+            status=500,
+            error_type="SERVER_ERROR",
+        )
+
+    # ── Audit log (written as the caller so it survives the deletion) ─────────
+    AuditService.log_action(
+        action=AuditAction.USER_HARD_DELETE,
+        user_id=caller.id,
+        organization_id=admin_in_shared_org.organization_id,
+        resource_type="user",
+        resource_id=target_id_str,
+        description=f"Admin permanently deleted user account: {target_email}",
+        metadata={
+            "deleted_user_id": target_id_str,
+            "deleted_user_email": target_email,
+            "ssh_keys_deleted": ssh_key_count,
+            "certs_revoked": active_cert_count,
+        },
+    )
+
+    _db.session.commit()
+
+    return api_response(
+        message=f"User account {target_email} has been permanently deleted.",
+        data={
+            "deleted_user_id": target_id_str,
+            "deleted_user_email": target_email,
+            "ssh_keys_deleted": ssh_key_count,
+            "certs_revoked": active_cert_count,
+        },
     )

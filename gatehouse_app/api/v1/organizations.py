@@ -226,6 +226,10 @@ def delete_organization(org_id):
     """
     Delete organization (soft delete).
 
+    The owner may only delete the organization if they are the *sole* remaining
+    member.  If other active members exist they must first transfer ownership
+    (or remove all other members) before deleting the organization.
+
     Args:
         org_id: Organization ID
 
@@ -234,8 +238,25 @@ def delete_organization(org_id):
         401: Not authenticated
         403: Not the owner
         404: Organization not found
+        409: Organization still has other members — transfer ownership first
     """
     org = OrganizationService.get_organization_by_id(org_id)
+
+    # Guard: block deletion while non-owner members still exist so ownership
+    # can be transferred rather than silently orphaning them.
+    active_member_count = org.get_member_count()
+    if active_member_count > 1:
+        return api_response(
+            success=False,
+            message=(
+                "This organization still has other members. "
+                "Please transfer ownership to another member or remove all "
+                "other members before deleting the organization."
+            ),
+            status=409,
+            error_type="ORG_HAS_MEMBERS",
+            error_details={"member_count": active_member_count},
+        )
 
     OrganizationService.delete_organization(
         org=org,
@@ -444,6 +465,152 @@ def update_member_role(org_id, user_id):
             error_type="VALIDATION_ERROR",
             error_details=e.messages,
         )
+
+
+@api_v1_bp.route("/organizations/<org_id>/transfer-ownership", methods=["POST"])
+@login_required
+@full_access_required
+def transfer_organization_ownership(org_id):
+    """Transfer organization ownership from the current user to another member.
+
+    Only the current OWNER of the organization may call this endpoint.
+    The caller will be demoted to ADMIN and the target user will be promoted to OWNER.
+
+    Request body:
+        new_owner_user_id (str): UUID of the member to promote to OWNER.
+
+    Returns:
+        200: Ownership transferred successfully
+        400: Validation error / missing fields
+        403: Caller is not the OWNER of this org
+        404: Organization or target member not found
+        409: Target is already the OWNER
+    """
+    from gatehouse_app.models.organization.organization_member import OrganizationMember
+    from gatehouse_app.utils.constants import OrganizationRole, AuditAction
+    from gatehouse_app.services.audit_service import AuditService
+
+    caller = g.current_user
+
+    data = request.get_json() or {}
+    new_owner_user_id = data.get("new_owner_user_id")
+    if not new_owner_user_id:
+        return api_response(
+            success=False,
+            message="new_owner_user_id is required",
+            status=400,
+            error_type="VALIDATION_ERROR",
+        )
+
+    if str(new_owner_user_id) == str(caller.id):
+        return api_response(
+            success=False,
+            message="You are already the owner of this organization.",
+            status=409,
+            error_type="CONFLICT",
+        )
+
+    # Fetch org (raises NotFound internally)
+    org = OrganizationService.get_organization_by_id(org_id)
+
+    # Confirm caller is the current OWNER
+    caller_membership = OrganizationMember.query.filter_by(
+        organization_id=org.id,
+        user_id=caller.id,
+        deleted_at=None,
+    ).first()
+    if not caller_membership or caller_membership.role != OrganizationRole.OWNER:
+        return api_response(
+            success=False,
+            message="Only the organization owner can transfer ownership.",
+            status=403,
+            error_type="AUTHORIZATION_ERROR",
+        )
+
+    # Verify the target is an active member
+    target_membership = OrganizationMember.query.filter_by(
+        organization_id=org.id,
+        user_id=new_owner_user_id,
+        deleted_at=None,
+    ).first()
+    if not target_membership:
+        return api_response(
+            success=False,
+            message="Target user is not a member of this organization.",
+            status=404,
+            error_type="NOT_FOUND",
+        )
+
+    if target_membership.role == OrganizationRole.OWNER:
+        return api_response(
+            success=False,
+            message="Target user is already the owner.",
+            status=409,
+            error_type="CONFLICT",
+        )
+
+    # ── Atomic role swap ─────────────────────────────────────────────────────
+    # Demote caller → ADMIN, promote target → OWNER.
+    # Both updates go through OrganizationService so all hooks/auditing fire.
+    try:
+        demoted = OrganizationService.update_member_role(
+            org=org,
+            user_id=str(caller.id),
+            new_role=OrganizationRole.ADMIN,
+            updater_id=str(caller.id),
+        )
+        promoted = OrganizationService.update_member_role(
+            org=org,
+            user_id=str(new_owner_user_id),
+            new_role=OrganizationRole.OWNER,
+            updater_id=str(caller.id),
+        )
+    except Exception as exc:
+        from gatehouse_app.extensions import db as _db
+        _db.session.rollback()
+        return api_response(
+            success=False,
+            message=f"Failed to transfer ownership: {exc}",
+            status=500,
+            error_type="SERVER_ERROR",
+        )
+
+    AuditService.log_action(
+        action=AuditAction.ORG_OWNERSHIP_TRANSFERRED,
+        user_id=caller.id,
+        organization_id=org.id,
+        resource_type="organization",
+        resource_id=str(org.id),
+        description=(
+            f"Ownership of '{org.name}' transferred from {caller.email} "
+            f"to {target_membership.user.email if target_membership.user else new_owner_user_id}"
+        ),
+        metadata={
+            "previous_owner_id": str(caller.id),
+            "previous_owner_email": caller.email,
+            "new_owner_id": str(new_owner_user_id),
+            "new_owner_email": (
+                target_membership.user.email if target_membership.user else None
+            ),
+        },
+    )
+
+    def _member_dict(m):
+        d = m.to_dict()
+        if m.user:
+            d["user"] = m.user.to_dict()
+        return d
+
+    return api_response(
+        data={
+            "previous_owner": _member_dict(demoted),
+            "new_owner": _member_dict(promoted),
+        },
+        message=(
+            f"Ownership of '{org.name}' successfully transferred to "
+            f"{target_membership.user.email if target_membership.user else new_owner_user_id}."
+        ),
+    )
 
 
 @api_v1_bp.route("/organizations/<org_id>/audit-logs", methods=["GET"])
@@ -756,9 +923,29 @@ def accept_invite(token):
             inviter_id=invite.invited_by_id,
         )
     except Exception:
-        pass  # Already a member is fine
+        from gatehouse_app.extensions import db
+        db.session.rollback()  # Clear broken transaction so invite.accept() can commit
 
     invite.accept()
+
+    has_webauthn = user.has_webauthn_enabled()
+    has_totp = user.has_totp_enabled()
+
+    if has_webauthn:
+        from flask import session as flask_session
+        flask_session["webauthn_pending_user_id"] = user.id
+        return api_response(
+            data={"requires_webauthn": True},
+            message="Passkey verification required. Please use your passkey to complete sign-in.",
+        )
+
+    if has_totp:
+        from flask import session as flask_session
+        flask_session["totp_pending_user_id"] = user.id
+        return api_response(
+            data={"requires_totp": True},
+            message="TOTP code required. Please enter your 6-digit code from your authenticator app.",
+        )
 
     user_session = AuthService.create_session(user)
 
@@ -1379,6 +1566,7 @@ def create_org_ca(org_id):
     from gatehouse_app.models.ssh_ca.ca import CA, KeyType
     from gatehouse_app.models.organization.organization import Organization
     from gatehouse_app.utils.crypto import compute_ssh_fingerprint
+    from gatehouse_app.utils.ca_key_encryption import encrypt_ca_key
     from marshmallow import Schema, fields as ma_fields, validate, ValidationError as MaValidationError
     from sshkey_tools.keys import Ed25519PrivateKey, RsaPrivateKey, EcdsaPrivateKey
 
@@ -1448,13 +1636,16 @@ def create_org_ca(org_id):
         public_key_str = private_key_obj.public_key.to_string()
         fingerprint = compute_ssh_fingerprint(public_key_str)
 
+        # Encrypt the private key before storing in the database
+        encrypted_private_key = encrypt_ca_key(private_key_pem)
+
         ca = CA(
             organization_id=org_id,
             name=data["name"],
             description=data["description"],
             ca_type=CaType(ca_type_val),
             key_type=KeyType(key_type),
-            private_key=private_key_pem,
+            private_key=encrypted_private_key,
             public_key=public_key_str,
             fingerprint=fingerprint,
             default_cert_validity_hours=data["default_cert_validity_hours"],
@@ -1462,7 +1653,24 @@ def create_org_ca(org_id):
             is_active=True,
         )
         db.session.add(ca)
-        db.session.commit()
+        try:
+            db.session.commit()
+        except Exception as commit_exc:
+            db.session.rollback()
+            # Surface unique-constraint violations (soft-deleted record with same name) as a
+            # user-friendly 400 instead of a 500.
+            exc_str = str(commit_exc).lower()
+            if "uix_org_ca_name" in exc_str or "unique" in exc_str:
+                return api_response(
+                    success=False,
+                    message=(
+                        "A CA with that name already exists in this organization "
+                        "(it may have been recently deleted — choose a different name)."
+                    ),
+                    status=400,
+                    error_type="DUPLICATE_NAME",
+                )
+            raise
 
         return api_response(
             data={"ca": ca.to_dict()},
@@ -1570,6 +1778,7 @@ def rotate_org_ca(org_id, ca_id):
     from gatehouse_app.models.ssh_ca.ca import CA, KeyType
     from gatehouse_app.models.organization.organization import Organization
     from gatehouse_app.utils.crypto import compute_ssh_fingerprint
+    from gatehouse_app.utils.ca_key_encryption import encrypt_ca_key
     from gatehouse_app.utils.constants import AuditAction
     from gatehouse_app.models import AuditLog
     from sshkey_tools.keys import Ed25519PrivateKey, RsaPrivateKey, EcdsaPrivateKey
@@ -1609,8 +1818,11 @@ def rotate_org_ca(org_id, ca_id):
         new_public_key = private_key_obj.public_key.to_string()
         new_fingerprint = compute_ssh_fingerprint(new_public_key)
 
+        # Encrypt the new private key before storing
+        encrypted_new_private_key = encrypt_ca_key(new_private_key)
+
         ca.rotate_key(
-            new_private_key=new_private_key,
+            new_private_key=encrypted_new_private_key,
             new_public_key=new_public_key,
             new_fingerprint=new_fingerprint,
             reason=reason,

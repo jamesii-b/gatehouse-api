@@ -15,6 +15,7 @@ from gatehouse_app.exceptions import (
 )
 from gatehouse_app.utils.constants import AuditAction
 from gatehouse_app.models import AuditLog
+from gatehouse_app.models.ssh_ca.certificate_audit_log import CertificateAuditLog
 from gatehouse_app.utils.decorators import login_required
 from gatehouse_app.utils.response import api_response
 
@@ -78,11 +79,16 @@ def _get_or_create_system_ca():
         with open(pub_key_path) as f:
             pub_key = f.read().strip()
 
-        # Load private key for the record (stored but not actually used for signing here)
+        # Load private key for the record (encrypt before storing in DB)
         priv_key = ""
         if os.path.exists(key_path):
             with open(key_path) as f:
-                priv_key = f.read()
+                raw_priv_key = f.read()
+            try:
+                from gatehouse_app.utils.ca_key_encryption import encrypt_ca_key
+                priv_key = encrypt_ca_key(raw_priv_key)
+            except Exception:
+                priv_key = raw_priv_key  # fallback: store as-is if encryption unavailable
 
         fingerprint = compute_ssh_fingerprint(pub_key)
 
@@ -120,7 +126,7 @@ def _get_or_create_system_ca():
         return None
 
 
-def _persist_certificate(user_id, ssh_key_id, ca, signing_response, request_ip=None, cert_type_str='user'):
+def _persist_certificate(user_id, ssh_key_id, ca, signing_response, request_ip=None, cert_type_str='user', cert_identity=None):
     """Save a signed certificate to the ssh_certificates table.
 
     Args:
@@ -130,6 +136,8 @@ def _persist_certificate(user_id, ssh_key_id, ca, signing_response, request_ip=N
         signing_response: SSHCertificateSigningResponse
         request_ip: Client IP address
         cert_type_str: 'user' or 'host' (from the sign request)
+        cert_identity: Rich OpenSSH key_id string (e.g. "user@host (Name) [org:slug]").
+                       Falls back to str(ssh_key_id) when not provided.
 
     Returns:
         SSHCertificate instance or None if persistence failed
@@ -153,7 +161,7 @@ def _persist_certificate(user_id, ssh_key_id, ca, signing_response, request_ip=N
             ssh_key_id=ssh_key_id,
             certificate=signing_response.certificate,
             serial=signing_response.serial,
-            key_id=str(ssh_key_id),
+            key_id=cert_identity or str(ssh_key_id),
             cert_type=resolved_cert_type,
             principals=signing_response.principals,
             valid_after=signing_response.valid_after,
@@ -465,7 +473,7 @@ def sign_certificate():
 
     # ── Check account suspension ──────────────────────────────────────────────
     from gatehouse_app.utils.constants import UserStatus
-    if user.status == UserStatus.SUSPENDED:
+    if user.status in (UserStatus.SUSPENDED, UserStatus.COMPLIANCE_SUSPENDED):
         return api_response(
             success=False,
             message="Your account is suspended. Contact an administrator.",
@@ -481,6 +489,18 @@ def sign_certificate():
     cert_type = data.get('cert_type', 'user')
     key_id = data.get('key_id') or data.get('cert_id')
     expiry_hours = data.get('expiry_hours')
+
+    # ── Log the request ───────────────────────────────────────────────────────
+    AuditLog.log(
+        action=AuditAction.SSH_CERT_REQUESTED,
+        user_id=user_id,
+        resource_type='SSHCertificate',
+        ip_address=request.remote_addr,
+        description=(
+            f'{user.email} requested a certificate'
+            + (f' for principals: {", ".join(requested_principals)}' if requested_principals else '')
+        ),
+    )
 
     # ── Resolve which principals the user is allowed to use ──────────────────
     from gatehouse_app.models.organization.organization_member import OrganizationMember
@@ -601,11 +621,24 @@ def sign_certificate():
     else:
         policy_extensions = None  # let signing service use its own defaults
 
+    # ── Build rich key_id identity for the OpenSSH cert ─────────────────────
+    # This appears in `ssh-keygen -L -f cert.pub` as the Key ID field and
+    # is stored in the DB cert record so it's auditable.
+    org_slugs = sorted({
+        om.organization.slug
+        for om in memberships
+        if om.organization and om.organization.deleted_at is None
+        and getattr(om.organization, 'slug', None)
+    })
+    org_slug = org_slugs[0] if org_slugs else "unknown"
+    full_name = getattr(user, 'full_name', None) or getattr(user, 'name', None) or "unknown"
+    cert_identity = f"{user.email} ({full_name}) [org:{org_slug}]"
+
     signing_request = SSHCertificateSigningRequest(
         ssh_public_key=ssh_key.payload,
         principals=principals,
         cert_type=cert_type,
-        key_id=key_id,
+        key_id=cert_identity,
         expiry_hours=int(expiry_hours) if expiry_hours else None,
         extensions=policy_extensions,
     )
@@ -620,7 +653,11 @@ def sign_certificate():
         )
 
     try:
-        response = ssh_ca_service.sign_certificate(signing_request, ca_private_key=db_ca.private_key)
+        from gatehouse_app.utils.ca_key_encryption import decrypt_ca_key
+        ca_private_key_pem = decrypt_ca_key(db_ca.private_key)
+        response = ssh_ca_service.sign_certificate(
+            signing_request, ca_private_key=ca_private_key_pem, ca_obj=db_ca
+        )
     except SSHCertificateError as e:
         AuditLog.log(
             action=AuditAction.SSH_CERT_FAILED,
@@ -649,6 +686,7 @@ def sign_certificate():
         signing_response=response,
         request_ip=request.remote_addr,
         cert_type_str=cert_type,
+        cert_identity=cert_identity,
     )
 
     AuditLog.log(
@@ -657,8 +695,41 @@ def sign_certificate():
         resource_type='SSHCertificate',
         resource_id=cert_record.id if cert_record else key_id,
         ip_address=request.remote_addr,
-        description=f'Certificate issued for principals: {", ".join(principals)}',
+        description=(
+            f'Certificate serial={response.serial} issued for {user.email}; '
+            f'principals: {", ".join(principals)}'
+        ),
+        extra_data={
+            'serial': response.serial,
+            'key_id': cert_identity,
+            'principals': principals,
+            'ca_id': str(db_ca.id),
+            'ssh_key_id': str(key_id),
+        },
     )
+
+    if cert_record:
+        CertificateAuditLog.log(
+            certificate_id=cert_record.id,
+            action='issued',
+            user_id=user_id,
+            ip_address=request.remote_addr,
+            user_agent=request.headers.get('User-Agent'),
+            message=(
+                f'Certificate serial={response.serial} issued for {user.email}; '
+                f'principals: {", ".join(principals)}'
+            ),
+            extra_data={
+                'serial': response.serial,
+                'key_id': cert_identity,
+                'principals': principals,
+                'ca_id': str(db_ca.id),
+                'ssh_key_id': str(key_id),
+                'valid_after': response.valid_after.isoformat() if response.valid_after else None,
+                'valid_before': response.valid_before.isoformat() if response.valid_before else None,
+            },
+            success=True,
+        )
 
     result = {
         'certificate': response.certificate,
@@ -751,6 +822,16 @@ def revoke_certificate(cert_id):
             resource_id=cert_id,
             ip_address=request.remote_addr,
             description=f'Revoked: {reason}',
+        )
+
+        CertificateAuditLog.log(
+            certificate_id=cert_id,
+            action='revoked',
+            user_id=user_id,
+            ip_address=request.remote_addr,
+            user_agent=request.headers.get('User-Agent'),
+            message=f'Certificate revoked: {reason}',
+            success=True,
         )
 
         return api_response(

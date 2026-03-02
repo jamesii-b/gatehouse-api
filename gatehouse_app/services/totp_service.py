@@ -11,9 +11,50 @@ from gatehouse_app.extensions import bcrypt
 
 logger = logging.getLogger(__name__)
 
+# TOTP codes are valid for at most (2*window + 1) * 30s steps.
+# With window=1 that's 3 steps = 90 seconds.  We use a slightly
+# generous TTL of 95 seconds to account for clock skew at boundaries.
+_TOTP_USED_CODE_TTL = 95
+
 
 class TOTPService:
     """Service for TOTP operations."""
+
+    # ------------------------------------------------------------------
+    # Replay-attack prevention helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _used_key(user_id: str, code: str) -> str:
+        return f"totp:used:{user_id}:{code}"
+
+    @staticmethod
+    def is_code_already_used(user_id: str, code: str) -> bool:
+        """Return True if *code* has already been accepted for *user_id*
+        within the current validity window (prevents replay attacks)."""
+        try:
+            from gatehouse_app.extensions import redis_client
+            if redis_client is None:
+                return False
+            return redis_client.exists(TOTPService._used_key(user_id, code)) == 1
+        except Exception:
+            logger.warning("Redis unavailable for TOTP replay check; allowing code")
+            return False
+
+    @staticmethod
+    def mark_code_used(user_id: str, code: str) -> None:
+        """Record *code* as consumed for *user_id* so it cannot be reused."""
+        try:
+            from gatehouse_app.extensions import redis_client
+            if redis_client is None:
+                return
+            redis_client.setex(
+                TOTPService._used_key(user_id, code),
+                _TOTP_USED_CODE_TTL,
+                "1",
+            )
+        except Exception:
+            logger.warning("Redis unavailable; TOTP used-code not recorded")
 
     @staticmethod
     def generate_secret() -> str:

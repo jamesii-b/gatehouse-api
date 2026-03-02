@@ -736,9 +736,14 @@ class ExternalAuthService:
                 400,
             )
 
-        # Generate PKCE
-        code_verifier = secrets.token_urlsafe(32)
-        code_challenge = cls._compute_s256_challenge(code_verifier)
+        # Generate PKCE — skip for confidential clients (Google, Microsoft) that use a
+        # client_secret. Sending code_challenge to Microsoft causes it to enforce PKCE on
+        # the token exchange, which then fails. Matches the behaviour of initiate_login_flow.
+        code_verifier = None
+        code_challenge = None
+        if provider_type_str not in ('google', 'microsoft'):
+            code_verifier = secrets.token_urlsafe(32)
+            code_challenge = cls._compute_s256_challenge(code_verifier)
 
         # Create OAuth state
         state = OAuthState.create_state(

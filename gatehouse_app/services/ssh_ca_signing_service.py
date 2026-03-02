@@ -192,13 +192,19 @@ class SSHCASigningService:
         self,
         signing_request: SSHCertificateSigningRequest,
         ca_private_key: Optional[str] = None,
-    ) -> SSHCertificateSigningResponse:
+        ca_obj=None,
+    ) -> "SSHCertificateSigningResponse":
         """Sign an SSH certificate.
         
         Args:
             signing_request: SSHCertificateSigningRequest instance
             ca_private_key: CA private key in PEM format. If not provided,
                           loaded from config (ca_key_path or SSH_CA_PRIVATE_KEY env var)
+            ca_obj: Optional CA model instance.  When supplied its monotonic
+                    serial counter is incremented atomically (SELECT FOR UPDATE)
+                    and the resulting integer is embedded in the certificate's
+                    serial field.  This ensures every issued cert has a unique,
+                    ordered, auditable serial number.
             
         Returns:
             SSHCertificateSigningResponse with signed certificate
@@ -245,13 +251,27 @@ class SSHCASigningService:
             valid_before = now + timedelta(hours=expiry_hours)
             
             # Set certificate fields
-            cert_type = 1 if signing_request.cert_type == "user" else 0
+            # sshkey-tools: user=1, host=2 (not 0)
+            cert_type = 1 if signing_request.cert_type == "user" else 2
             
             certificate.fields.cert_type = cert_type
             certificate.fields.key_id = signing_request.key_id
             certificate.fields.principals = signing_request.principals
             certificate.fields.valid_after = now
             certificate.fields.valid_before = valid_before
+
+            # ── Serial number ────────────────────────────────────────────────
+            # If a CA object is provided, use its monotonic counter so every
+            # certificate gets a unique, ordered, auditable serial.  The
+            # counter increment is flushed inside get_next_serial(); the
+            # caller's commit() persists it atomically with the cert record.
+            if ca_obj is not None:
+                assigned_serial = ca_obj.get_next_serial()
+                certificate.fields.serial = assigned_serial
+                self.logger.debug(
+                    f"Assigned serial {assigned_serial} from CA {ca_obj.id}"
+                )
+            # ─────────────────────────────────────────────────────────────────
             
             # Set extensions — prefer policy-provided list, fall back to standard set
             extensions = signing_request.extensions
@@ -276,8 +296,13 @@ class SSHCASigningService:
                 self.logger.error(f"Certificate verification failed: {str(e)}")
                 raise SSHCASigningError(f"Certificate verification failed: {str(e)}")
             
-            # Extract serial from certificate
-            serial = str(certificate.fields.serial).split(":")[-1].strip() if hasattr(certificate.fields.serial, '__str__') else str(certificate.fields.serial)
+            # Extract serial from certificate — use the integer we assigned
+            # when ca_obj was provided, otherwise fall back to whatever the
+            # library generated.
+            if ca_obj is not None:
+                serial = str(assigned_serial)
+            else:
+                serial = str(certificate.fields.serial).split(":")[-1].strip() if hasattr(certificate.fields.serial, '__str__') else str(certificate.fields.serial)
             
             # Build response
             cert_string = certificate.to_string()

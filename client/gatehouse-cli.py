@@ -51,8 +51,7 @@ class MyServer(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(bytes("<html><head><title>OIDC Workflow Tool</title></head>", "utf-8"))
         self.wfile.write(bytes("<body><p>The token has been received</p>", "utf-8"))
-        self.wfile.write(bytes("<p>Window closing in <span id='countdown'>5</span> seconds...</p>", "utf-8"))
-        self.wfile.write(bytes("<script>var count = 5; setInterval(function() { count--; document.getElementById('countdown').textContent = count; if (count === 0) window.close(); }, 1000);</script>", "utf-8"))
+        self.wfile.write(bytes("<p>You may now close this window.</p>", "utf-8"))
         self.wfile.write(bytes("</body></html>", "utf-8"))
 
         parsed_url = urlparse(self.path)

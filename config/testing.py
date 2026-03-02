@@ -12,6 +12,9 @@ class TestingConfig(BaseConfig):
     # Explicitly set SECRET_KEY for testing
     SECRET_KEY = os.getenv("SECRET_KEY", "test-secret-key-for-testing")
 
+    # CA key encryption — use a fixed test key so tests are deterministic
+    CA_ENCRYPTION_KEY = os.getenv("CA_ENCRYPTION_KEY", "test-ca-encryption-key-fixed-for-tests")
+
     # Use in-memory SQLite for testing
     SQLALCHEMY_DATABASE_URI = "sqlite:///:memory:"
     SQLALCHEMY_ECHO = False

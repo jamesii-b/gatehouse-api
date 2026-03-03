@@ -42,7 +42,7 @@ class SSHCertificate(BaseModel):
     ssh_key_id = db.Column(
         db.String(36),
         db.ForeignKey("ssh_keys.id"),
-        nullable=False,
+        nullable=True,   # Nullable: host certs may be issued against a raw public key
         index=True,
     )
 

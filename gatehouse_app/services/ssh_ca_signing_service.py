@@ -53,7 +53,9 @@ class SSHCertificateSigningRequest:
         self.cert_type = cert_type
         self.expiry_hours = expiry_hours
         self.critical_options = critical_options or {}
-        self.extensions = extensions or []
+        # Preserve None vs [] distinction: None means "use CA/policy default";
+        # [] means "explicitly no extensions" (correct for host certificates).
+        self.extensions = extensions  # type: Optional[List[str]]
 
     def validate(self) -> List[str]:
         """Validate the signing request.
@@ -273,11 +275,18 @@ class SSHCASigningService:
                 )
             # ─────────────────────────────────────────────────────────────────
             
-            # Set extensions — prefer policy-provided list, fall back to standard set
+            # Set extensions — prefer policy-provided list, fall back to standard set.
+            # Host certificates (cert_type=2) must have NO extensions per the OpenSSH
+            # spec; passing an empty list is correct and intentional for host certs.
+            # Only fall back to STANDARD_EXTENSIONS for user certificates when the
+            # caller did not supply an explicit (possibly empty) extension list.
             extensions = signing_request.extensions
-            if not extensions:
-                from gatehouse_app.models.organization.department_cert_policy import STANDARD_EXTENSIONS
-                extensions = list(STANDARD_EXTENSIONS)
+            if extensions is None:
+                if signing_request.cert_type == "user":
+                    from gatehouse_app.models.organization.department_cert_policy import STANDARD_EXTENSIONS
+                    extensions = list(STANDARD_EXTENSIONS)
+                else:
+                    extensions = []  # host certs: no extensions
 
             certificate.fields.extensions = extensions
             certificate.fields.critical_options = signing_request.critical_options or {}

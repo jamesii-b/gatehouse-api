@@ -1,5 +1,6 @@
 """Security headers middleware."""
-from flask import request
+import os
+from flask import current_app, request
 
 
 class SecurityHeadersMiddleware:
@@ -34,13 +35,22 @@ class SecurityHeadersMiddleware:
             )
 
         # Content Security Policy
+        try:
+            flask_env = current_app.config.get("ENV") or os.environ.get("FLASK_ENV", "production")
+            if flask_env == "development":
+                connect_src = "connect-src 'self' http://localhost:5000 http://127.0.0.1:5000"
+            else:
+                connect_src = "connect-src 'self'"
+        except RuntimeError:
+            connect_src = "connect-src 'self'"
+
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
             "script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: https:; "
             "font-src 'self' data:; "
-            "connect-src 'self'"
+            + connect_src
         )
 
         # Referrer Policy

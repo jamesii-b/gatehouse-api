@@ -15,11 +15,11 @@ load_dotenv()
 
 from gatehouse_app import create_app
 from gatehouse_app.extensions import db
-from gatehouse_app.models.user import User
-from gatehouse_app.models.organization import Organization
-from gatehouse_app.models.organization_member import OrganizationMember
-from gatehouse_app.models.authentication_method import AuthenticationMethod
-from gatehouse_app.models.oidc_client import OIDCClient
+from gatehouse_app.models.user.user import User
+from gatehouse_app.models.organization.organization import Organization
+from gatehouse_app.models.organization.organization_member import OrganizationMember
+from gatehouse_app.models.auth.authentication_method import AuthenticationMethod
+from gatehouse_app.models.oidc.oidc_client import OIDCClient
 from gatehouse_app.services.auth_service import AuthService
 from gatehouse_app.services.organization_service import OrganizationService
 from gatehouse_app.utils.constants import OrganizationRole, UserStatus, AuthMethodType

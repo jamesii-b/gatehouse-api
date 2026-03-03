@@ -1,6 +1,6 @@
 """Session service."""
 from datetime import datetime, timezone
-from gatehouse_app.models.session import Session
+from gatehouse_app.models.user.session import Session
 from gatehouse_app.utils.constants import SessionStatus
 
 
@@ -17,7 +17,7 @@ class SessionService:
         Returns:
             Session object if found and active, None otherwise
         """
-        from gatehouse_app.models.session import Session
+        from gatehouse_app.models.user.session import Session
         from gatehouse_app.utils.constants import SessionStatus
         return Session.query.filter_by(
             token=token,

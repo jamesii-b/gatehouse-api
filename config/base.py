@@ -28,6 +28,11 @@ class BaseConfig:
     
     # Encryption key for sensitive data (client secrets, tokens, etc.)
     ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "dev-encryption-key-change-in-production")
+
+    # Encryption key for CA private keys stored in the database.
+    # Must be set to a strong random secret in production.
+    # Any string is accepted — it is SHA-256 derived to a 32-byte Fernet key internally.
+    CA_ENCRYPTION_KEY = os.getenv("CA_ENCRYPTION_KEY", "dev-ca-encryption-key-change-in-production")
     
     # Session configuration for WebAuthn cross-origin support
     SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "True").lower() == "true"
@@ -71,6 +76,13 @@ class BaseConfig:
     RATELIMIT_ENABLED = os.getenv("RATELIMIT_ENABLED", "True").lower() == "true"
     RATELIMIT_STORAGE_URL = os.getenv("RATELIMIT_STORAGE_URL", "redis://localhost:6379/1")
     RATELIMIT_DEFAULT = "100/hour"
+
+    # Per-endpoint auth rate limits (override via env vars for each environment)
+    RATELIMIT_AUTH_REGISTER = os.getenv("RATELIMIT_AUTH_REGISTER", "10 per minute; 50 per hour")
+    RATELIMIT_AUTH_LOGIN = os.getenv("RATELIMIT_AUTH_LOGIN", "20 per minute; 100 per hour")
+    RATELIMIT_AUTH_TOTP_VERIFY = os.getenv("RATELIMIT_AUTH_TOTP_VERIFY", "20 per minute; 100 per hour")
+    RATELIMIT_AUTH_FORGOT_PASSWORD = os.getenv("RATELIMIT_AUTH_FORGOT_PASSWORD", "5 per minute; 20 per hour")
+    RATELIMIT_AUTH_RESET_PASSWORD = os.getenv("RATELIMIT_AUTH_RESET_PASSWORD", "10 per minute; 30 per hour")
 
     # Logging
     LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
@@ -116,3 +128,11 @@ class BaseConfig:
 
     # Frontend URL (for OAuth callback redirects)
     FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8080")
+
+    # Email / SMTP
+    EMAIL_ENABLED = os.getenv("EMAIL_ENABLED", "False").lower() == "true"
+    SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USERNAME = os.getenv("SMTP_USERNAME", "")
+    SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+    FROM_ADDRESS = os.getenv("FROM_ADDRESS", "noreply@gatehouse.local")

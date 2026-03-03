@@ -21,8 +21,12 @@ from gatehouse_app.extensions import db
 from gatehouse_app.extensions import bcrypt as flask_bcrypt
 from gatehouse_app.extensions import redis_client as _redis_client_ref  # may be None until app init
 from gatehouse_app.models import User, OIDCClient
-from gatehouse_app.models.organization import Organization
-from gatehouse_app.exceptions.auth_exceptions import InvalidCredentialsError
+from gatehouse_app.models.organization.organization import Organization
+from gatehouse_app.exceptions.auth_exceptions import (
+    InvalidCredentialsError,
+    AccountSuspendedError,
+    AccountInactiveError,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers for Redis-backed OIDC pending state
@@ -326,7 +330,7 @@ def oidc_complete():
         400: invalid request
         401: invalid token
     """
-    from gatehouse_app.models.session import Session as GHSession
+    from gatehouse_app.models.user.session import Session as GHSession
     from gatehouse_app.utils.constants import SessionStatus
 
     data = request.get_json(silent=True) or {}
@@ -342,6 +346,20 @@ def oidc_complete():
         return api_response(success=False, message="Invalid or expired token", status=401)
 
     user_id = str(gh_session.user_id)
+
+    # Check the user is still active (not suspended after session was issued)
+    from gatehouse_app.models.user.user import User as _User
+    from gatehouse_app.utils.constants import UserStatus
+    _complete_user = _User.query.filter_by(id=user_id, deleted_at=None).first()
+    if not _complete_user or _complete_user.status in (
+        UserStatus.SUSPENDED, UserStatus.COMPLIANCE_SUSPENDED, UserStatus.INACTIVE
+    ):
+        return api_response(
+            success=False,
+            message="Your account is not active or has been suspended.",
+            status=403,
+            error_type="ACCOUNT_SUSPENDED",
+        )
 
     # Retrieve stashed OIDC params (consume = True removes from Redis atomically)
     params = _fetch_oidc_params(oidc_session_id, consume=True)
@@ -565,6 +583,28 @@ def oidc_authorize():
             session["oidc_user_id"] = user_id
             
             logger.debug("[OIDC] User authentication successful: user_id=%s, email=%s", user_id, email)
+        except AccountSuspendedError:
+            logger.debug("[OIDC] User authentication failed: account suspended for email=%s", email)
+            return _show_login_page(
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                scope=scope,
+                state=state,
+                nonce=nonce,
+                response_type=response_type,
+                error="Your account has been suspended. Please contact an administrator.",
+            )
+        except AccountInactiveError:
+            logger.debug("[OIDC] User authentication failed: account inactive for email=%s", email)
+            return _show_login_page(
+                client_id=client_id,
+                redirect_uri=redirect_uri,
+                scope=scope,
+                state=state,
+                nonce=nonce,
+                response_type=response_type,
+                error="Your account is not active. Please verify your email.",
+            )
         except InvalidCredentialsError:
             logger.debug("[OIDC] User authentication failed: invalid credentials for email=%s", email)
             return _show_login_page(
@@ -600,7 +640,34 @@ def oidc_authorize():
     if not user:
         logger.debug("[OIDC] Redirecting with error: server_error (user not found)")
         return _redirect_with_error(redirect_uri, "server_error", "User not found", state)
-    
+
+    # Check account is still active (user could have been suspended after session start)
+    from gatehouse_app.utils.constants import UserStatus as _UserStatus
+    if user.status in (_UserStatus.SUSPENDED, _UserStatus.COMPLIANCE_SUSPENDED):
+        session.pop("oidc_user_id", None)  # clear stale session
+        logger.debug("[OIDC] User is suspended, clearing session and showing login error: user_id=%s", user_id)
+        return _show_login_page(
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            scope=scope,
+            state=state,
+            nonce=nonce,
+            response_type=response_type,
+            error="Your account has been suspended. Please contact an administrator.",
+        )
+    if user.status == _UserStatus.INACTIVE:
+        session.pop("oidc_user_id", None)
+        logger.debug("[OIDC] User is inactive, clearing session and showing login error: user_id=%s", user_id)
+        return _show_login_page(
+            client_id=client_id,
+            redirect_uri=redirect_uri,
+            scope=scope,
+            state=state,
+            nonce=nonce,
+            response_type=response_type,
+            error="Your account is not active. Please verify your email.",
+        )
+
     logger.debug("[OIDC] Generating authorization code...")
     logger.debug("[OIDC] Authorization code params: client_id=%s, user_id=%s, redirect_uri=%s", client_id, user_id, redirect_uri)
     logger.debug("[OIDC] Authorization code params: scopes=%s, state=%s, nonce=%s", valid_scopes, state, nonce)

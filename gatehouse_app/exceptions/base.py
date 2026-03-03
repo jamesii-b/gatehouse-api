@@ -16,9 +16,10 @@ class BaseAPIException(Exception):
             message: Custom error message
             error_details: Additional error details dictionary
         """
-        super().__init__()
+        super().__init__(self.message)
         if message:
             self.message = message
+            super().__init__(message)  # update args so str(e) works
         self.error_details = error_details or {}
 
     def to_dict(self):

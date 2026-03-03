@@ -19,9 +19,9 @@ import logging
 import json
 
 from gatehouse_app.extensions import db
-from gatehouse_app.models.mfa_policy_compliance import MfaPolicyCompliance
-from gatehouse_app.models.organization_security_policy import OrganizationSecurityPolicy
-from gatehouse_app.models.user import User
+from gatehouse_app.models.security.mfa_policy_compliance import MfaPolicyCompliance
+from gatehouse_app.models.security.organization_security_policy import OrganizationSecurityPolicy
+from gatehouse_app.models.user.user import User
 from gatehouse_app.services.audit_service import AuditService
 from gatehouse_app.utils.constants import AuditAction
 
@@ -37,6 +37,7 @@ class NotificationService:
     SMTP_PORT_KEY = "SMTP_PORT"
     SMTP_USERNAME_KEY = "SMTP_USERNAME"
     SMTP_PASSWORD_KEY = "SMTP_PASSWORD"
+    SMTP_USE_TLS_KEY = "SMTP_USE_TLS"
     FROM_ADDRESS_KEY = "FROM_ADDRESS"
 
     @staticmethod
@@ -86,10 +87,9 @@ class NotificationService:
             if success:
                 logger.info(
                     f"Sent MFA deadline reminder to {user.email} "
-                    f"({days_until_deadline} days remaining # Audit log
-)"
+                    f"({days_until_deadline} days remaining)"
                 )
-                               AuditService.log_action(
+                AuditService.log_action(
                     action=AuditAction.MFA_POLICY_USER_COMPLIANT,
                     user_id=user.id,
                     organization_id=compliance.organization_id,
@@ -291,101 +291,62 @@ Gatehouse Security Team
         body: str,
         html_body: Optional[str] = None,
     ) -> bool:
-        """Send an email notification.
+        """Send an email via SMTP.
 
-        This method attempts to send an email using configured SMTP settings.
-        If email is not configured, it logs the notification instead.
-
-        Args:
-            to_address: Recipient email address
-            subject: Email subject
-            body: Plain text email body
-            html_body: Optional HTML email body
-
-        Returns:
-            True if email was sent (or logged), False on error
+        Returns True if the email was sent successfully, False otherwise.
+        If EMAIL_ENABLED is False, logs the email body instead (simulation mode).
         """
+        import smtplib
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+        from flask import current_app
+
+        email_enabled = current_app.config.get(NotificationService.EMAIL_ENABLED_KEY, False)
+
+        if not email_enabled:
+            logger.info(
+                f"[EMAIL DISABLED] Would have sent to: {to_address} | Subject: {subject}\n"
+                f"Body: {body[:500]}"
+            )
+            return False
+
+        smtp_host = current_app.config.get(NotificationService.SMTP_HOST_KEY, "localhost")
+        smtp_port = int(current_app.config.get(NotificationService.SMTP_PORT_KEY, 587))
+        smtp_username = current_app.config.get(NotificationService.SMTP_USERNAME_KEY)
+        smtp_password = current_app.config.get(NotificationService.SMTP_PASSWORD_KEY)
+        smtp_use_tls = current_app.config.get(
+            NotificationService.SMTP_USE_TLS_KEY,
+            smtp_port not in (25, 1025),
+        )
+        from_address = current_app.config.get(
+            NotificationService.FROM_ADDRESS_KEY, "noreply@gatehouse.local"
+        )
+
         try:
-            from flask import current_app
+            msg = MIMEMultipart("alternative")
+            msg["Subject"] = subject
+            msg["From"] = from_address
+            msg["To"] = to_address
+            msg.attach(MIMEText(body, "plain"))
+            if html_body:
+                msg.attach(MIMEText(html_body, "html"))
 
-            # Check if email is configured
-            email_enabled = current_app.config.get(
-                NotificationService.EMAIL_ENABLED_KEY, False
-            )
-
-            if not email_enabled:
-                # Log the notification instead of sending
-                logger.info(
-                    f"[EMAIL SIMULATION] To: {to_address}\n"
-                    f"Subject: {subject}\n"
-                    f"Body: {body[:200]}..." if len(body) > 200 else f"Body: {body}"
-                )
-                return True
-
-            # Get email configuration
-            smtp_host = current_app.config.get(NotificationService.SMTP_HOST_KEY)
-            smtp_port = current_app.config.get(NotificationService.SMTP_PORT_KEY, 587)
-            smtp_username = current_app.config.get(NotificationService.SMTP_USERNAME_KEY)
-            smtp_password = current_app.config.get(NotificationService.SMTP_PASSWORD_KEY)
-            from_address = current_app.config.get(
-                NotificationService.FROM_ADDRESS_KEY, "noreply@gatehouse.local"
-            )
-
-            # Import send_email based on available mail library
-            try:
-                from flask_mail import Message
-
-                from gatehouse_app import mail
-
-                msg = Message(
-                    subject=subject,
-                    recipients=[to_address],
-                    body=body,
-                    html=html_body,
-                    sender=from_address,
-                )
-                mail.send(msg)
-                logger.info(f"Email sent successfully to {to_address}")
-                return True
-
-            except ImportError:
-                # Flask-Mail not available, use SMTP directly
-                import smtplib
-                from email.mime.text import MIMEText
-                from email.mime.multipart import MIMEMultipart
-
-                msg = MIMEMultipart("alternative")
-                msg["Subject"] = subject
-                msg["From"] = from_address
-                msg["To"] = to_address
-
-                # Attach plain text and HTML versions
-                part1 = MIMEText(body, "plain")
-                msg.attach(part1)
-
-                if html_body:
-                    part2 = MIMEText(html_body, "html")
-                    msg.attach(part2)
-
-                # Send via SMTP
-                with smtplib.SMTP(smtp_host, smtp_port) as server:
+            with smtplib.SMTP(smtp_host, smtp_port) as server:
+                server.ehlo()
+                if smtp_use_tls:
                     server.starttls()
-                    if smtp_username and smtp_password:
-                        server.login(smtp_username, smtp_password)
-                    server.send_message(msg)
+                    server.ehlo()
+                if smtp_username and smtp_password:
+                    server.login(smtp_username, smtp_password)
+                server.send_message(msg)
 
-                logger.info(f"Email sent successfully to {to_address}")
-                return True
+            logger.info(f"[EMAIL] Sent to {to_address} | Subject: {subject}")
+            return True
 
         except Exception as e:
-            logger.exception(f"Failed to send email to {to_address}: {e}")
-            # Log the notification as fallback
-            logger.info(
-                f"[EMAIL FALLBACK] To: {to_address}\n"
-                f"Subject: {subject}\n"
-                f"Body: {body[:500]}..." if len(body) > 500 else f"Body: {body}"
-            )
-            return True  # Return True to continue processing
+            logger.error(f"[EMAIL] Failed to send to {to_address}: {e}")
+            return False
+
 
     @staticmethod
     def get_notification_stats(user_id: str) -> Dict[str, Any]:
@@ -397,7 +358,7 @@ Gatehouse Security Team
         Returns:
             Dictionary with notification statistics
         """
-        from gatehouse_app.models.mfa_policy_compliance import MfaPolicyCompliance
+        from gatehouse_app.models.security.mfa_policy_compliance import MfaPolicyCompliance
 
         stats = {
             "total_notifications": 0,

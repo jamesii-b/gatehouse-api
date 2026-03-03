@@ -26,14 +26,13 @@ class AuditLog(BaseModel):
     extra_data = db.Column(db.JSON, nullable=True)
     description = db.Column(db.Text, nullable=True)
 
-    # Success/failure
+    # Outcome
     success = db.Column(db.Boolean, default=True, nullable=False)
     error_message = db.Column(db.Text, nullable=True)
 
     # Relationships
     user = db.relationship("User", back_populates="audit_logs")
 
-    # Indexes for common queries
     __table_args__ = (
         db.Index("idx_audit_user_action", "user_id", "action"),
         db.Index("idx_audit_resource", "resource_type", "resource_id"),
@@ -45,9 +44,8 @@ class AuditLog(BaseModel):
         return f"<AuditLog action={self.action} user_id={self.user_id}>"
 
     @classmethod
-    def log(cls, action, user_id=None, **kwargs):
-        """
-        Create an audit log entry.
+    def log(cls, action, user_id=None, **kwargs) -> "AuditLog":
+        """Create an audit log entry.
 
         Args:
             action: AuditAction enum value

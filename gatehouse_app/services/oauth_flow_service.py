@@ -9,10 +9,10 @@ from flask import current_app, request, g, redirect
 
 from gatehouse_app.extensions import db
 from gatehouse_app.models import User, AuthenticationMethod
-from gatehouse_app.models.authentication_method import OAuthState
+from gatehouse_app.models.auth.authentication_method import OAuthState
 from gatehouse_app.models.base import BaseModel
-from gatehouse_app.models.oidc_authorization_code import OIDCAuthCode
-from gatehouse_app.utils.constants import AuthMethodType
+from gatehouse_app.models.oidc.oidc_authorization_code import OIDCAuthCode
+from gatehouse_app.utils.constants import AuthMethodType, AuditAction
 from gatehouse_app.services.audit_service import AuditService
 from gatehouse_app.services.external_auth_service import (
     ExternalAuthService,
@@ -139,7 +139,7 @@ class OAuthFlowService:
         except ExternalAuthError as e:
             # Log failed initiation
             AuditService.log_action(
-                action="external_auth.login.initiated",
+                action=AuditAction.EXTERNAL_AUTH_LOGIN_FAILED,
                 organization_id=organization_id,
                 metadata={
                     "provider_type": provider_type_str,
@@ -236,7 +236,7 @@ class OAuthFlowService:
 
         except ExternalAuthError as e:
             AuditService.log_action(
-                action="external_auth.register.initiated",
+                action=AuditAction.EXTERNAL_AUTH_LOGIN_FAILED,
                 organization_id=organization_id,
                 metadata={
                     "provider_type": provider_type_str,
@@ -399,6 +399,27 @@ class OAuthFlowService:
                 access_token=tokens["access_token"],
             )
 
+            if not user_info.get("provider_user_id"):
+                raise OAuthFlowError(
+                    "Provider did not return a user identifier (sub claim). "
+                    "Cannot complete authentication.",
+                    "MISSING_PROVIDER_USER_ID",
+                    400,
+                )
+
+            if not user_info.get("email"):
+                raise OAuthFlowError(
+                    "Provider did not return an email address. "
+                    "Cannot complete authentication.",
+                    "MISSING_EMAIL",
+                    400,
+                )
+
+            logger.debug(
+                f"Got user_info from provider: sub={user_info['provider_user_id']}, "
+                f"email={user_info['email']}, email_verified={user_info.get('email_verified')}"
+            )
+
             # Look up user by provider_user_id
             auth_method = AuthenticationMethod.query.filter_by(
                 method_type=provider_type,
@@ -494,25 +515,52 @@ class OAuthFlowService:
             if not target_org and len(user_orgs) == 1:
                 target_org = user_orgs[0]
 
-            # Priority 3: No orgs at all — auto-create a personal org and log in
+            # Priority 3: No orgs at all — send to org-setup instead of auto-creating
             if not target_org and len(user_orgs) == 0:
-                import re
-                import uuid
-                from gatehouse_app.services.organization_service import OrganizationService
-                org_name = f"{user_info.get('name') or user.email.split('@')[0]}'s Workspace"
-                # Build a URL-safe slug and ensure uniqueness with a short suffix
-                base_slug = re.sub(r"[^a-z0-9]+", "-", org_name.lower()).strip("-")[:40]
-                slug = f"{base_slug}-{uuid.uuid4().hex[:6]}"
-                org = OrganizationService.create_organization(
-                    name=org_name,
-                    slug=slug,
-                    owner_user_id=user.id,
-                )
-                target_org = org
+                from gatehouse_app.models.organization.org_invite_token import OrgInviteToken
+                from gatehouse_app.services.auth_service import AuthService as _AS
+                _now = datetime.now(timezone.utc)
+                _session = _AS.create_session(user=user, is_compliance_only=False)
+                _session_dict = _session.to_dict()
+                _session_dict["token"] = _session.token
+                _expires_at = _session.expires_at
+                if _expires_at.tzinfo is None:
+                    _expires_at = _expires_at.replace(tzinfo=timezone.utc)
+                _session_dict["expires_in"] = int((_expires_at - _now).total_seconds())
+
+                _pending = OrgInviteToken.query.filter(
+                    OrgInviteToken.email == user.email,
+                    OrgInviteToken.accepted_at.is_(None),
+                    OrgInviteToken.expires_at > _now,
+                    OrgInviteToken.deleted_at.is_(None),
+                ).all()
+                _pending_list = [
+                    {
+                        "token": inv.token,
+                        "organization": {
+                            "id": str(inv.organization_id),
+                            "name": inv.organization.name,
+                        },
+                        "role": inv.role,
+                        "expires_at": inv.expires_at.isoformat(),
+                    }
+                    for inv in _pending
+                ]
+
+                state_record.mark_used()
                 logger.info(
-                    f"OAuth login: auto-created org '{org.name}' (id={org.id}) "
-                    f"for new user {user.id}"
+                    f"OAuth login: user {user.id} has no org, redirecting to org-setup "
+                    f"(pending_invites={len(_pending_list)})"
                 )
+                return {
+                    "success": True,
+                    "flow_type": "login",
+                    "requires_org_creation": True,
+                    "user": {"id": user.id, "email": user.email, "full_name": user.full_name},
+                    "session": _session_dict,
+                    "pending_invites": _pending_list,
+                    "state": state_record.state,
+                }
 
             # Priority 4: Multiple orgs — need user to pick one
             if not target_org:
@@ -755,7 +803,7 @@ class OAuthFlowService:
 
             # If organization_id hint was provided and valid, create session for that org
             if state_record.organization_id:
-                from gatehouse_app.models.organization import Organization
+                from gatehouse_app.models.organization.organization import Organization
                 org = Organization.query.get(state_record.organization_id)
                 if org:
                     from gatehouse_app.services.auth_service import AuthService
@@ -784,7 +832,40 @@ class OAuthFlowService:
                         "session": session_dict,
                     }
 
-            # No organization hint or invalid - need to create/select org
+            # No organization hint or invalid - need to create/select org.
+            # Still create a session so the frontend can call /organizations
+            # and /invites after redirecting to /org-setup.
+            from gatehouse_app.services.auth_service import AuthService as _AS
+            from gatehouse_app.models.organization.org_invite_token import OrgInviteToken
+            _session = _AS.create_session(user=user, is_compliance_only=False)
+            _session_dict = _session.to_dict()
+            _session_dict["token"] = _session.token
+            _expires_at = _session.expires_at
+            if _expires_at.tzinfo is None:
+                _expires_at = _expires_at.replace(tzinfo=timezone.utc)
+            _now = datetime.now(timezone.utc)
+            _session_dict["expires_in"] = int((_expires_at - _now).total_seconds())
+
+            # Surface pending invitations so the UI can offer "join vs create"
+            _pending = OrgInviteToken.query.filter(
+                OrgInviteToken.email == user.email,
+                OrgInviteToken.accepted_at.is_(None),
+                OrgInviteToken.expires_at > _now,
+                OrgInviteToken.deleted_at.is_(None),
+            ).all()
+            _pending_list = [
+                {
+                    "token": inv.token,
+                    "organization": {
+                        "id": str(inv.organization_id),
+                        "name": inv.organization.name,
+                    },
+                    "role": inv.role,
+                    "expires_at": inv.expires_at.isoformat(),
+                }
+                for inv in _pending
+            ]
+
             return {
                 "success": True,
                 "flow_type": "register",
@@ -794,6 +875,8 @@ class OAuthFlowService:
                     "email": user.email,
                     "full_name": user.full_name,
                 },
+                "session": _session_dict,
+                "pending_invites": _pending_list,
                 "state": state_record.state,
             }
 
@@ -966,8 +1049,8 @@ class OAuthFlowService:
             )
         
         # Determine organization
-        from gatehouse_app.models.organization import Organization
-        from gatehouse_app.models.organization_member import OrganizationMember
+        from gatehouse_app.models.organization.organization import Organization
+        from gatehouse_app.models.organization.organization_member import OrganizationMember
         
         # Get user's organizations
         user_orgs = user.get_organizations()

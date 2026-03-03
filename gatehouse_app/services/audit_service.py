@@ -1,6 +1,6 @@
 """Audit service."""
 from flask import request, g
-from gatehouse_app.models.audit_log import AuditLog
+from gatehouse_app.models.auth.audit_log import AuditLog
 from gatehouse_app.utils.constants import AuditAction
 
 
@@ -59,7 +59,7 @@ class AuditService:
             ip_address=ip_address,
             user_agent=user_agent,
             request_id=request_id,
-            metadata=metadata,
+            extra_data=metadata,
             description=description,
             success=success,
             error_message=error_message,

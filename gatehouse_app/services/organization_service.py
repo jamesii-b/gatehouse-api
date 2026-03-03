@@ -3,8 +3,8 @@ import logging
 from datetime import datetime, timezone
 from flask import current_app
 from gatehouse_app.extensions import db
-from gatehouse_app.models.organization import Organization
-from gatehouse_app.models.organization_member import OrganizationMember
+from gatehouse_app.models.organization.organization import Organization
+from gatehouse_app.models.organization.organization_member import OrganizationMember
 from gatehouse_app.exceptions.validation_exceptions import OrganizationNotFoundError, ConflictError
 from gatehouse_app.utils.constants import OrganizationRole, AuditAction
 from gatehouse_app.services.audit_service import AuditService
@@ -188,11 +188,10 @@ class OrganizationService:
         Raises:
             ConflictError: If user is already a member
         """
-        # Check if already a member
+        # Check if already a member (active or soft-deleted — both blocked by DB unique constraint)
         existing = OrganizationMember.query.filter_by(
             user_id=user_id,
             organization_id=org.id,
-            deleted_at=None,
         ).first()
 
         # Development-only debug logging for membership validation
@@ -200,6 +199,25 @@ class OrganizationService:
             logger.debug(f"[Org] Member check: org_id={org.id}, user_id={user_id}, already_member={existing is not None}")
 
         if existing:
+            if existing.deleted_at is not None:
+                # Reactivate the soft-deleted membership with the new role
+                existing.deleted_at = None
+                existing.role = role
+                existing.invited_by_id = inviter_id
+                existing.invited_at = datetime.now(timezone.utc)
+                existing.joined_at = datetime.now(timezone.utc)
+                existing.save()
+
+                AuditService.log_action(
+                    action=AuditAction.ORG_MEMBER_ADD,
+                    user_id=inviter_id,
+                    organization_id=org.id,
+                    resource_type="organization_member",
+                    resource_id=existing.id,
+                    metadata={"added_user_id": user_id, "role": role.value},
+                    description=f"Member re-added to organization with role: {role.value}",
+                )
+                return existing
             raise ConflictError("User is already a member of this organization")
 
         # Create membership

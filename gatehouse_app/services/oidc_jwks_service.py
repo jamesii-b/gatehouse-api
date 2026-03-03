@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Tuple
 from flask import current_app
 
 from gatehouse_app.extensions import db
-from gatehouse_app.models.oidc_jwks_key import OidcJwksKey
+from gatehouse_app.models.oidc.oidc_jwks_key import OidcJwksKey
 
 
 class JWKSKey:

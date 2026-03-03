@@ -11,7 +11,7 @@ import jwt
 from flask import current_app, g
 
 from gatehouse_app.models import User, OIDCClient
-from gatehouse_app.models.organization_member import OrganizationMember
+from gatehouse_app.models.organization.organization_member import OrganizationMember
 from gatehouse_app.services.oidc_jwks_service import OIDCJWKSService
 
 logger = logging.getLogger(__name__)

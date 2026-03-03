@@ -14,7 +14,7 @@ from gatehouse_app.models import (
     User, OIDCClient, OIDCAuthCode, OIDCRefreshToken,
     OIDCSession, OIDCTokenMetadata
 )
-from gatehouse_app.models.organization_member import OrganizationMember
+from gatehouse_app.models.organization.organization_member import OrganizationMember
 from gatehouse_app.exceptions.validation_exceptions import (
     ValidationError, NotFoundError, BadRequestError
 )

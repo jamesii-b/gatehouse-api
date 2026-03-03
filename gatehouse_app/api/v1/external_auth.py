@@ -46,6 +46,33 @@ def _pop_oidc_bridge(oauth_state: str) -> str | None:
         pass
     return None
 
+
+def _store_cli_redirect(oauth_state: str, redirect_url: str) -> None:
+    """Store CLI redirect_url keyed by OAuth state (for /token_please flow)."""
+    try:
+        import gatehouse_app.extensions as _ext
+        rc = _ext.redis_client
+        if rc is not None:
+            rc.setex(f"oauth_cli_redirect:{oauth_state}", _OAUTH_BRIDGE_TTL, redirect_url)
+    except Exception:
+        pass
+
+
+def _pop_cli_redirect(oauth_state: str) -> str | None:
+    """Retrieve and delete CLI redirect_url for the given OAuth state."""
+    try:
+        import gatehouse_app.extensions as _ext
+        rc = _ext.redis_client
+        if rc is not None:
+            key = f"oauth_cli_redirect:{oauth_state}"
+            val = rc.get(key)
+            if val:
+                rc.delete(key)
+                return val.decode() if isinstance(val, bytes) else val
+    except Exception:
+        pass
+    return None
+
 logger = logging.getLogger(__name__)
 
 
@@ -69,6 +96,137 @@ def get_provider_type(provider: str) -> AuthMethodType:
     return PROVIDER_TYPE_MAP[provider_lower]
 
 
+@api_v1_bp.route("/token_please", methods=["GET"])
+def token_please():
+    """
+    CLI token acquisition endpoint.
+
+    Redirects the user's browser to the Gatehouse login page so they can
+    authenticate using any method (password, OAuth, passkey, TOTP, etc.).
+    On successful login the frontend delivers the session token directly to
+    the CLI's local callback server.
+
+    This endpoint is designed for CLI clients that:
+      1. Start a local HTTP server on LISTENER_SERVER_PORT (e.g. 8250)
+      2. Open a browser to  /api/v1/token_please?redirect_url=http://127.0.0.1:8250/?token=
+      3. Wait for the browser to deliver the token to their local server
+
+    Query parameters:
+        redirect_url: Local callback URL where the token will be appended
+    """
+    import secrets
+    from urllib.parse import urlencode, quote
+    from flask import current_app, redirect as flask_redirect
+
+    redirect_url = request.args.get("redirect_url", "").strip()
+
+    if not redirect_url:
+        return api_response(
+            success=False,
+            message="redirect_url query parameter is required",
+            status=400,
+            error_type="MISSING_REDIRECT_URL",
+        )
+
+    # Validate redirect_url is localhost/127.0.0.1 (security: prevent open redirect)
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(redirect_url)
+    if parsed.hostname not in ("localhost", "127.0.0.1"):
+        return api_response(
+            success=False,
+            message="redirect_url must point to localhost",
+            status=400,
+            error_type="INVALID_REDIRECT_URL",
+        )
+
+    # Store the CLI redirect URL in Redis keyed by a short-lived token so the
+    # frontend can retrieve it after login without it being visible in the URL.
+    cli_token = secrets.token_urlsafe(32)
+    try:
+        import gatehouse_app.extensions as _ext
+        rc = _ext.redis_client
+        if rc is not None:
+            rc.setex(f"cli_redirect:{cli_token}", _OAUTH_BRIDGE_TTL, redirect_url)
+        else:
+            logger.warning("Redis not available; passing cli_redirect directly in URL")
+            cli_token = None
+    except Exception:
+        cli_token = None
+
+    frontend_url = current_app.config.get("FRONTEND_URL", "http://localhost:8080")
+
+    if cli_token:
+        # Pass an opaque token; the frontend exchanges it for the real URL via
+        # GET /api/v1/cli/redirect-url?token=<cli_token>
+        login_url = f"{frontend_url}/login?cli_token={cli_token}"
+    else:
+        # Fallback: put the redirect URL directly (still localhost-only, validated above)
+        login_url = f"{frontend_url}/login?cli_redirect={quote(redirect_url, safe='')}"
+
+    logger.info(f"CLI token_please: redirecting browser to Gatehouse login page")
+    return flask_redirect(login_url, code=302)
+
+
+@api_v1_bp.route("/cli/redirect-url", methods=["GET"])
+def cli_redirect_url_lookup():
+    """
+    Exchange a short-lived cli_token for the CLI's local redirect URL.
+
+    Called by the frontend LoginPage after it detects the cli_token query
+    param so it can obtain the actual CLI callback URL from Redis without
+    exposing it in the browser URL bar.
+
+    Query parameters:
+        token: The cli_token issued by /token_please
+
+    Returns:
+        200: { "redirect_url": "http://127.0.0.1:8250/?token=" }
+        400: Missing token
+        404: Token not found or expired
+    """
+    cli_token = request.args.get("token", "").strip()
+    if not cli_token:
+        return api_response(
+            success=False,
+            message="token query parameter is required",
+            status=400,
+            error_type="MISSING_TOKEN",
+        )
+
+    try:
+        import gatehouse_app.extensions as _ext
+        rc = _ext.redis_client
+        if rc is not None:
+            key = f"cli_redirect:{cli_token}"
+            val = rc.get(key)
+            if val is None:
+                return api_response(
+                    success=False,
+                    message="CLI token not found or expired",
+                    status=404,
+                    error_type="TOKEN_NOT_FOUND",
+                )
+            # Keep the key alive until the login actually completes (consume on use
+            # would break multi-step auth like TOTP), so we leave it as-is.
+            redirect_url = val.decode() if isinstance(val, bytes) else val
+            return api_response(data={"redirect_url": redirect_url})
+    except Exception as e:
+        logger.error(f"cli_redirect_url_lookup error: {e}")
+        return api_response(
+            success=False,
+            message="Internal error looking up CLI token",
+            status=500,
+            error_type="INTERNAL_ERROR",
+        )
+
+    return api_response(
+        success=False,
+        message="Redis not available",
+        status=503,
+        error_type="SERVICE_UNAVAILABLE",
+    )
+
+
 # =============================================================================
 # Provider Configuration Endpoints (Admin)
 # =============================================================================
@@ -83,7 +241,7 @@ def list_providers():
         200: List of providers with their configuration status
         401: Not authenticated
     """
-    from gatehouse_app.models.authentication_method import ApplicationProviderConfig
+    from gatehouse_app.models.auth.authentication_method import ApplicationProviderConfig
     from gatehouse_app.services.external_auth_service import ExternalProviderConfig
 
     # Check app-level provider configs (ApplicationProviderConfig)
@@ -575,8 +733,6 @@ def initiate_oauth_authorize(provider: str):
             "state": "state_token"
         }
     """
-    provider_type = get_provider_type(provider)
-
     # Get query parameters - organization_id is now optional
     flow = request.args.get("flow", "login")
     redirect_uri = request.args.get("redirect_uri")
@@ -592,7 +748,7 @@ def initiate_oauth_authorize(provider: str):
         )
 
     try:
-        # Initiate flow - organization_id is now optional
+        provider_type = get_provider_type(provider)
         if flow == "login":
             auth_url, state = OAuthFlowService.initiate_login_flow(
                 provider_type=provider_type,
@@ -620,6 +776,13 @@ def initiate_oauth_authorize(provider: str):
         )
 
     except OAuthFlowError as e:
+        return api_response(
+            success=False,
+            message=e.message,
+            status=e.status_code,
+            error_type=e.error_type,
+        )
+    except ExternalAuthError as e:
         return api_response(
             success=False,
             message=e.message,
@@ -666,8 +829,19 @@ def handle_oauth_callback(provider: str):
     frontend_url = current_app.config.get("FRONTEND_URL", "http://localhost:8080")
     frontend_callback = f"{frontend_url}/oauth/callback"
 
+    # Check if this is a CLI /token_please flow — retrieve stored redirect_url
+    cli_redirect_url = _pop_cli_redirect(state) if state else None
+
     def redirect_error(message: str, error_type: str = "OAUTH_ERROR"):
-        """Redirect to frontend with error params."""
+        """Redirect to frontend (or CLI) with error params."""
+        if cli_redirect_url:
+            # CLI flow: return a plain error page instead of redirecting back
+            from flask import make_response
+            return make_response(
+                f"<html><body><h2>Authentication Error</h2><p>{message}</p>"
+                f"<p>You may close this window.</p></body></html>",
+                400,
+            )
         params = {"error": message, "error_type": error_type}
         if state:
             params["state"] = state
@@ -706,8 +880,11 @@ def handle_oauth_callback(provider: str):
         # Recover oidc_session_id if this was triggered from an OIDC bridge flow
         oidc_session_id = _pop_oidc_bridge(state)
 
+        # Organization selection / creation flows are not supported in CLI mode
+        # (fall through to token redirect with whatever session we have)
+
         # Organization selection needed (user belongs to multiple orgs)
-        if result.get("requires_org_selection"):
+        if result.get("requires_org_selection") and not cli_redirect_url:
             import json
             orgs = json.dumps(result.get("available_organizations", []))
             params = {
@@ -722,12 +899,20 @@ def handle_oauth_callback(provider: str):
             return flask_redirect(f"{frontend_callback}?{urlencode(params)}", code=302)
 
         # Organization creation needed (new user via OAuth with no org)
-        if result.get("requires_org_creation"):
+        if result.get("requires_org_creation") and not cli_redirect_url:
+            import json as _json
+            session_data = result.get("session", {})
+            token = session_data.get("token", "")
+            expires_in = session_data.get("expires_in", 86400)
+            pending_invites = result.get("pending_invites", [])
             params = {
                 "requires_org_creation": "1",
                 "state": result["state"],
                 "provider": provider,
                 "flow": flow_type,
+                "token": token,
+                "expires_in": str(expires_in),
+                "pending_invites": _json.dumps(pending_invites),
             }
             if oidc_session_id:
                 params["oidc_session_id"] = oidc_session_id
@@ -751,6 +936,19 @@ def handle_oauth_callback(provider: str):
         user_info = result.get("user", {})
         if user_info.get("email"):
             params["email"] = user_info["email"]
+
+        # ── CLI /token_please flow: redirect to the CLI's local callback ─────
+        if cli_redirect_url:
+            # The CLI expects: http://127.0.0.1:8250/?token=<TOKEN>
+            # cli_redirect_url already ends with "token=" so just append the value
+            cli_final_url = cli_redirect_url + token
+            logger.info(
+                f"CLI token_please success: provider={provider}, user={user_info.get('email')}, "
+                f"redirecting to CLI callback"
+            )
+            return flask_redirect(cli_final_url, code=302)
+
+        # ── Frontend flow ─────────────────────────────────────────────────────
         # Pass oidc_session_id through so the frontend can complete the OIDC flow
         if oidc_session_id:
             params["oidc_session_id"] = oidc_session_id
@@ -1049,3 +1247,203 @@ def _get_provider_endpoints(provider_type: AuthMethodType):
             "UNSUPPORTED_PROVIDER",
             400,
         )
+
+
+# =============================================================================
+# Admin: Application-level OAuth Provider Management
+# =============================================================================
+
+@api_v1_bp.route("/admin/oauth/providers", methods=["GET"])
+@login_required
+def admin_list_app_providers():
+    """List all application-level OAuth provider configurations (admin only).
+
+    Returns:
+        200: List of providers with client_id and enabled status
+        401: Not authenticated
+        403: Not an admin
+    """
+    from gatehouse_app.models.auth.authentication_method import ApplicationProviderConfig
+    from gatehouse_app.models import OrganizationMember
+    from gatehouse_app.utils.constants import OrganizationRole
+
+    # Verify caller is admin in any org
+    admin_memberships = OrganizationMember.query.filter(
+        OrganizationMember.user_id == g.current_user.id,
+        OrganizationMember.role.in_([OrganizationRole.OWNER, OrganizationRole.ADMIN]),
+    ).all()
+
+    if not admin_memberships:
+        return api_response(
+            success=False,
+            message="Admin access required",
+            status=403,
+            error_type="FORBIDDEN",
+        )
+
+    PROVIDERS = [
+        {"id": "google", "name": "Google"},
+        {"id": "github", "name": "GitHub"},
+        {"id": "microsoft", "name": "Microsoft"},
+    ]
+
+    db_configs = {
+        c.provider_type: c
+        for c in ApplicationProviderConfig.query.all()
+    }
+
+    result = []
+    for p in PROVIDERS:
+        cfg = db_configs.get(p["id"])
+        result.append({
+            "id": p["id"],
+            "name": p["name"],
+            "is_configured": cfg is not None,
+            "is_enabled": cfg.is_enabled if cfg else False,
+            "client_id": cfg.client_id if cfg else None,
+        })
+
+    return api_response(
+        data={"providers": result},
+        message="OAuth providers retrieved successfully",
+    )
+
+
+@api_v1_bp.route("/admin/oauth/providers/<provider>", methods=["PUT"])
+@login_required
+def admin_configure_app_provider(provider: str):
+    """Create or update an application-level OAuth provider config (admin only).
+
+    Args:
+        provider: Provider type (google, github, microsoft)
+
+    Request body:
+        client_id: OAuth client ID
+        client_secret: OAuth client secret (optional — omit to keep existing)
+        is_enabled: Whether the provider is enabled (default: true)
+
+    Returns:
+        200: Provider configuration updated
+        400: Validation error
+        401: Not authenticated
+        403: Not an admin
+    """
+    from gatehouse_app.models.auth.authentication_method import ApplicationProviderConfig
+    from gatehouse_app.models import OrganizationMember
+    from gatehouse_app.utils.constants import OrganizationRole
+    from gatehouse_app.extensions import db
+
+    SUPPORTED = ["google", "github", "microsoft"]
+    if provider not in SUPPORTED:
+        return api_response(
+            success=False,
+            message=f"Unsupported provider. Must be one of: {', '.join(SUPPORTED)}",
+            status=400,
+            error_type="VALIDATION_ERROR",
+        )
+
+    # Verify caller is admin in any org
+    admin_memberships = OrganizationMember.query.filter(
+        OrganizationMember.user_id == g.current_user.id,
+        OrganizationMember.role.in_([OrganizationRole.OWNER, OrganizationRole.ADMIN]),
+    ).all()
+
+    if not admin_memberships:
+        return api_response(
+            success=False,
+            message="Admin access required",
+            status=403,
+            error_type="FORBIDDEN",
+        )
+
+    data = request.json or {}
+    client_id = (data.get("client_id") or "").strip()
+    client_secret = (data.get("client_secret") or "").strip()
+    is_enabled = data.get("is_enabled", True)
+
+    if not client_id:
+        return api_response(
+            success=False,
+            message="client_id is required",
+            status=400,
+            error_type="VALIDATION_ERROR",
+        )
+
+    cfg = ApplicationProviderConfig.query.filter_by(provider_type=provider).first()
+    if cfg:
+        cfg.client_id = client_id
+        if client_secret:
+            cfg.set_client_secret(client_secret)
+        cfg.is_enabled = bool(is_enabled)
+        db.session.commit()
+    else:
+        cfg = ApplicationProviderConfig(
+            provider_type=provider,
+            client_id=client_id,
+            is_enabled=bool(is_enabled),
+        )
+        if client_secret:
+            cfg.set_client_secret(client_secret)
+        db.session.add(cfg)
+        db.session.commit()
+
+    return api_response(
+        data={
+            "provider": {
+                "id": provider,
+                "client_id": cfg.client_id,
+                "is_enabled": cfg.is_enabled,
+            }
+        },
+        message=f"{provider.capitalize()} OAuth provider configured successfully",
+    )
+
+
+@api_v1_bp.route("/admin/oauth/providers/<provider>", methods=["DELETE"])
+@login_required
+def admin_delete_app_provider(provider: str):
+    """Delete an application-level OAuth provider config (admin only).
+
+    Args:
+        provider: Provider type (google, github, microsoft)
+
+    Returns:
+        200: Provider configuration deleted
+        404: Provider not found
+        401: Not authenticated
+        403: Not an admin
+    """
+    from gatehouse_app.models.auth.authentication_method import ApplicationProviderConfig
+    from gatehouse_app.models import OrganizationMember
+    from gatehouse_app.utils.constants import OrganizationRole
+    from gatehouse_app.extensions import db
+
+    # Verify caller is admin in any org
+    admin_memberships = OrganizationMember.query.filter(
+        OrganizationMember.user_id == g.current_user.id,
+        OrganizationMember.role.in_([OrganizationRole.OWNER, OrganizationRole.ADMIN]),
+    ).all()
+
+    if not admin_memberships:
+        return api_response(
+            success=False,
+            message="Admin access required",
+            status=403,
+            error_type="FORBIDDEN",
+        )
+
+    cfg = ApplicationProviderConfig.query.filter_by(provider_type=provider).first()
+    if not cfg:
+        return api_response(
+            success=False,
+            message=f"Provider '{provider}' is not configured",
+            status=404,
+            error_type="NOT_FOUND",
+        )
+
+    db.session.delete(cfg)
+    db.session.commit()
+
+    return api_response(
+        message=f"{provider.capitalize()} OAuth provider configuration removed",
+    )

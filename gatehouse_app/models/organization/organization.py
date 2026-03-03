@@ -34,6 +34,15 @@ class Organization(BaseModel):
         cascade="all, delete-orphan",
         foreign_keys="OrganizationSecurityPolicy.organization_id",
     )
+    departments = db.relationship(
+        "Department", back_populates="organization", cascade="all, delete-orphan"
+    )
+    principals = db.relationship(
+        "Principal", back_populates="organization", cascade="all, delete-orphan"
+    )
+    cas = db.relationship(
+        "CA", back_populates="organization", cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
         """String representation of Organization."""
@@ -52,9 +61,9 @@ class Organization(BaseModel):
                 return member.user
         return None
 
-    def is_member(self, user_id):
+    def is_member(self, user_id: str) -> bool:
         """Check if a user is a member of the organization."""
-        from gatehouse_app.models.organization_member import OrganizationMember
+        from gatehouse_app.models.organization.organization_member import OrganizationMember
 
         return (
             OrganizationMember.query.filter_by(

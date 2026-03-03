@@ -17,10 +17,10 @@ class OIDCClient(BaseModel):
     client_secret_hash = db.Column(db.String(255), nullable=False)
 
     # OAuth/OIDC configuration
-    redirect_uris = db.Column(db.JSON, nullable=False)  # List of allowed redirect URIs
-    grant_types = db.Column(db.JSON, nullable=False)  # List of allowed grant types
-    response_types = db.Column(db.JSON, nullable=False)  # List of allowed response types
-    scopes = db.Column(db.JSON, nullable=False)  # List of allowed scopes
+    redirect_uris = db.Column(db.JSON, nullable=False)       # Allowed redirect URIs
+    grant_types = db.Column(db.JSON, nullable=False)         # Allowed grant types
+    response_types = db.Column(db.JSON, nullable=False)      # Allowed response types
+    scopes = db.Column(db.JSON, nullable=False)              # Allowed scopes
 
     # Client metadata
     logo_uri = db.Column(db.String(512), nullable=True)
@@ -41,6 +41,23 @@ class OIDCClient(BaseModel):
     # Relationships
     organization = db.relationship("Organization", back_populates="oidc_clients")
 
+    # OIDC sub-resource relationships (declared here, not monkey-patched elsewhere)
+    authorization_codes = db.relationship(
+        "OIDCAuthCode", back_populates="client", cascade="all, delete-orphan"
+    )
+    refresh_tokens = db.relationship(
+        "OIDCRefreshToken", back_populates="client", cascade="all, delete-orphan"
+    )
+    oidc_sessions = db.relationship(
+        "OIDCSession", back_populates="client", cascade="all, delete-orphan"
+    )
+    token_metadata = db.relationship(
+        "OIDCTokenMetadata", back_populates="client", cascade="all, delete-orphan"
+    )
+    audit_logs = db.relationship(
+        "OIDCAuditLog", back_populates="client", cascade="all, delete-orphan"
+    )
+
     def __repr__(self):
         """String representation of OIDCClient."""
         return f"<OIDCClient {self.name} client_id={self.client_id}>"
@@ -48,22 +65,22 @@ class OIDCClient(BaseModel):
     def to_dict(self, exclude=None):
         """Convert to dictionary, excluding sensitive fields."""
         exclude = exclude or []
-        # Always exclude client secret
-        exclude.append("client_secret_hash")
+        if "client_secret_hash" not in exclude:
+            exclude.append("client_secret_hash")
         return super().to_dict(exclude=exclude)
 
-    def has_grant_type(self, grant_type):
+    def has_grant_type(self, grant_type) -> bool:
         """Check if client supports a specific grant type."""
         return grant_type in self.grant_types
 
-    def has_response_type(self, response_type):
+    def has_response_type(self, response_type) -> bool:
         """Check if client supports a specific response type."""
         return response_type in self.response_types
 
-    def is_redirect_uri_allowed(self, redirect_uri):
+    def is_redirect_uri_allowed(self, redirect_uri: str) -> bool:
         """Check if a redirect URI is allowed for this client."""
         return redirect_uri in self.redirect_uris
 
-    def has_scope(self, scope):
+    def has_scope(self, scope: str) -> bool:
         """Check if client is allowed to request a specific scope."""
         return scope in self.scopes

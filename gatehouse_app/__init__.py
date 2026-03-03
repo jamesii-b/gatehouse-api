@@ -2,6 +2,9 @@
 import os
 import logging
 
+from dotenv import load_dotenv
+load_dotenv(dotenv_path=os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
+
 # Test debug logging - this should appear when running `flask run --debug`
 _root_logger = logging.getLogger(__name__)
 _root_logger.debug("[TEST] Debug logging is working!")
@@ -239,3 +242,6 @@ def initialize_oidc_jwks(app):
             app.logger.info(f"[OIDC] Signing key initialized: kid={signing_key.kid}")
         except Exception as e:
             app.logger.error(f"[OIDC] Failed to initialize JWKS: {e}")
+
+# Create default app instance for gunicorn/wsgi
+app = create_app()

@@ -25,7 +25,7 @@ class LoginSchema(Schema):
 
     email = fields.Email(required=True)
     password = fields.Str(required=True, validate=validate.Length(min=1))
-    remember_me = fields.Bool(missing=False)
+    remember_me = fields.Bool(load_default=False)
 
 
 class RefreshTokenSchema(Schema):
@@ -77,13 +77,37 @@ class TOTPVerifyEnrollmentSchema(Schema):
 class TOTPVerifySchema(Schema):
     """Schema for TOTP code verification during login."""
 
-    code = fields.Str(required=True)
-    is_backup_code = fields.Bool(missing=False)
+    code = fields.Str(
+        required=True,
+        validate=validate.Length(min=1),
+    )
+    is_backup_code = fields.Bool(load_default=False)
     client_timestamp = fields.Int(
         required=False,
         allow_none=True,
         metadata={"description": "Client UTC timestamp in seconds since epoch for TOTP verification"},
     )
+
+    @validates_schema
+    def validate_code_format(self, data, **kwargs):
+        """Validate code format depending on whether it's a backup code."""
+        code = data.get("code", "")
+        is_backup_code = data.get("is_backup_code", False)
+        if is_backup_code:
+            # Backup codes are 16 uppercase hex characters
+            if not code or len(code) != 16 or not all(c in "0123456789ABCDEFabcdef" for c in code):
+                raise ValidationError(
+                    "Backup code must be a 16-character hexadecimal string.",
+                    field_name="code",
+                )
+        else:
+            # Regular TOTP codes are exactly 6 digits
+            import re
+            if not re.match(r"^\d{6}$", code):
+                raise ValidationError(
+                    "Code must be a 6-digit number.",
+                    field_name="code",
+                )
 
 
 class TOTPDisableSchema(Schema):

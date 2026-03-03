@@ -73,49 +73,61 @@ def delete_me():
     """
     Delete current user account (soft delete).
 
-    Blocked if the user is the sole owner of any organization that has other
-    active members — they must transfer ownership or dissolve those organizations
-    first.
+    Behaviour for owned organizations:
+      - If the org has other active members  → blocked; user must transfer ownership first.
+      - If they are the sole member          → org is automatically cascade-deleted (no orphan risk).
 
     Returns:
-        200: Account deleted successfully
+        200: Account deleted successfully (sole-member orgs auto-deleted)
         401: Not authenticated
-        409: User is sole owner of one or more organizations with other members
+        409: USER_IS_SOLE_OWNER — user owns orgs that still have other members
     """
     from gatehouse_app.models.organization.organization_member import OrganizationMember
     from gatehouse_app.utils.constants import OrganizationRole
+    from gatehouse_app.services.organization_service import OrganizationService
 
     user = g.current_user
 
-    # Find orgs where this user is the sole owner AND other members exist.
+    # Find all orgs where this user is the owner.
     owned_memberships = OrganizationMember.query.filter_by(
         user_id=user.id,
         role=OrganizationRole.OWNER,
         deleted_at=None,
     ).all()
 
-    blocked_orgs = []
+    # Separate into two buckets depending on whether other members exist.
+    transfer_needed = []   # org has other members → must transfer ownership first
+    auto_delete = []       # user is sole member   → safe to cascade-delete automatically
+
     for membership in owned_memberships:
         org = membership.organization
         if org.deleted_at is not None:
             continue
         member_count = org.get_member_count()
         if member_count > 1:
-            blocked_orgs.append(org.name)
+            transfer_needed.append(org.name)
+        else:
+            auto_delete.append(org)
 
-    if blocked_orgs:
-        names = ", ".join(f'"{n}"' for n in blocked_orgs)
+    # Hard block: user owns orgs with other members — must transfer first.
+    if transfer_needed:
+        names = ", ".join(f'"{n}"' for n in transfer_needed)
         return api_response(
             success=False,
             message=(
-                f"You are the sole owner of {len(blocked_orgs)} organization"
-                f"{'s' if len(blocked_orgs) > 1 else ''}: {names}. "
-                "Transfer ownership or delete those organizations before deleting your account."
+                f"You are the owner of {len(transfer_needed)} organization"
+                f"{'s' if len(transfer_needed) > 1 else ''} that still "
+                f"{'have' if len(transfer_needed) > 1 else 'has'} other members "
+                f"({names}). Transfer ownership to another member first."
             ),
             status=409,
             error_type="USER_IS_SOLE_OWNER",
-            error_details={"organizations": blocked_orgs},
+            error_details={"transfer_ownership": transfer_needed},
         )
+
+    # Auto-delete any sole-member orgs so no orphaned org rows can ever be left behind.
+    for org in auto_delete:
+        OrganizationService.force_delete_organization(org, user_id=user.id)
 
     UserService.delete_user(user, soft=True)
 

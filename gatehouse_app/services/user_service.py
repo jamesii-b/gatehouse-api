@@ -91,6 +91,26 @@ class UserService:
         """
         Delete user account.
 
+        For a soft delete this method also soft-deletes every related row that
+        has its own ``deleted_at`` column so that those records stop appearing
+        in active queries immediately:
+          - OrganizationMember      (user no longer shows in member lists)
+          - DepartmentMembership
+          - PrincipalMembership
+          - CAPermission            (CA access revoked)
+          - MfaPolicyCompliance     (compliance record hidden)
+          - AuthenticationMethod    (login methods hidden)
+          - SSHKey                  (keys are hidden)
+          - SSHCertificate          (certs are revoked + hidden)
+          - Session                 (all active sessions killed)
+          - OIDCAuthCode            (pending auth codes invalidated)
+          - OIDCRefreshToken        (refresh tokens invalidated)
+          - OIDCSession             (OIDC sessions killed)
+          - OIDCTokenMetadata       (token metadata hidden)
+
+        All changes are committed in a single transaction after the user row
+        itself is marked deleted, preventing any partial-delete state.
+
         Args:
             user: User instance
             soft: If True, performs soft delete
@@ -98,7 +118,84 @@ class UserService:
         Returns:
             Deleted User instance
         """
-        user.delete(soft=soft)
+        from datetime import datetime, timezone
+        from gatehouse_app.extensions import db as _db
+
+        if soft:
+            now = datetime.now(timezone.utc)
+
+            # --- Org memberships -------------------------------------------
+            for m in user.organization_memberships:
+                if m.deleted_at is None:
+                    m.deleted_at = now
+
+            # --- Department memberships -------------------------------------
+            for m in user.department_memberships:
+                if m.deleted_at is None:
+                    m.deleted_at = now
+
+            # --- Principal memberships --------------------------------------
+            for m in user.principal_memberships:
+                if m.deleted_at is None:
+                    m.deleted_at = now
+
+            # --- CA permissions --------------------------------------------
+            for p in user.ca_permissions:
+                if p.deleted_at is None:
+                    p.deleted_at = now
+
+            # --- MFA compliance records ------------------------------------
+            for c in user.mfa_compliance:
+                if c.deleted_at is None:
+                    c.deleted_at = now
+
+            # --- Authentication methods ------------------------------------
+            for m in user.authentication_methods:
+                if m.deleted_at is None:
+                    m.deleted_at = now
+
+            # --- SSH keys ---------------------------------------------------
+            for key in user.ssh_keys:
+                if key.deleted_at is None:
+                    key.deleted_at = now
+
+            # --- SSH certificates: revoke then soft-delete ------------------
+            for cert in user.ssh_certificates:
+                if cert.deleted_at is None:
+                    try:
+                        if not getattr(cert, "revoked", False):
+                            cert.revoke("account_deleted")
+                    except Exception:
+                        pass
+                    cert.deleted_at = now
+
+            # --- Sessions ---------------------------------------------------
+            for session in user.sessions:
+                if session.deleted_at is None:
+                    session.deleted_at = now
+
+            # --- OIDC tokens / sessions ------------------------------------
+            for code in user.oidc_auth_codes:
+                if code.deleted_at is None:
+                    code.deleted_at = now
+
+            for token in user.oidc_refresh_tokens:
+                if token.deleted_at is None:
+                    token.deleted_at = now
+
+            for oidc_session in user.oidc_sessions:
+                if oidc_session.deleted_at is None:
+                    oidc_session.deleted_at = now
+
+            for meta in user.oidc_token_metadata:
+                if meta.deleted_at is None:
+                    meta.deleted_at = now
+
+            # --- Mark the user row itself -----------------------------------
+            user.deleted_at = now
+            _db.session.commit()
+        else:
+            user.delete(soft=False)
 
         # Log user deletion
         AuditService.log_action(

@@ -172,6 +172,52 @@ class OrganizationService:
         return org
 
     @staticmethod
+    def force_delete_organization(org, user_id):
+        """
+        Force-delete an organization and all its members in a single atomic operation.
+
+        All active memberships are soft-deleted before the organization itself
+        is soft-deleted, preventing orphaned membership rows and avoiding any
+        cascade deadlocks.
+
+        Args:
+            org: Organization instance
+            user_id: ID of the owner performing the delete
+
+        Returns:
+            Deleted Organization instance
+        """
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        member_count = 0
+
+        # Soft-delete all active memberships first.
+        for member in org.members:
+            if member.deleted_at is None:
+                member.deleted_at = now
+                member_count += 1
+
+        # Now soft-delete the organization itself.
+        org.delete(soft=True)
+
+        # Log with member count for audit trail.
+        AuditService.log_action(
+            action=AuditAction.ORG_DELETE,
+            user_id=user_id,
+            organization_id=org.id,
+            resource_type="organization",
+            resource_id=org.id,
+            metadata={"members_removed": member_count},
+            description=(
+                f"Organization deleted by owner; "
+                f"{member_count} membership(s) removed."
+            ),
+        )
+
+        return org
+
+    @staticmethod
     def add_member(org, user_id, role, inviter_id):
         """
         Add a member to the organization.

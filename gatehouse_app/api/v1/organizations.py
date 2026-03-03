@@ -220,48 +220,73 @@ def update_organization(org_id):
 
 @api_v1_bp.route("/organizations/<org_id>", methods=["DELETE"])
 @login_required
-@require_owner
 @full_access_required
 def delete_organization(org_id):
     """
     Delete organization (soft delete).
 
-    The owner may only delete the organization if they are the *sole* remaining
-    member.  If other active members exist they must first transfer ownership
-    (or remove all other members) before deleting the organization.
+    Only the OWNER of the organization may call this endpoint.
+
+    When the organization has other active members the caller must explicitly
+    confirm the deletion by sending ``{"confirm": true}`` in the request body.
+    All members (and their memberships) are soft-deleted together with the org
+    in a single atomic transaction so no orphaned data is left behind.
 
     Args:
         org_id: Organization ID
 
+    Request body (JSON, optional):
+        confirm (bool): Required when the org has other active members.
+
     Returns:
         200: Organization deleted successfully
+        400: Organization has other members but confirm was not true
         401: Not authenticated
         403: Not the owner
         404: Organization not found
-        409: Organization still has other members — transfer ownership first
     """
+    from gatehouse_app.models.organization.organization_member import OrganizationMember as _OrgMember
+    from gatehouse_app.utils.constants import OrganizationRole as _OrgRole
+
+    caller = g.current_user
+
     org = OrganizationService.get_organization_by_id(org_id)
 
-    # Guard: block deletion while non-owner members still exist so ownership
-    # can be transferred rather than silently orphaning them.
-    active_member_count = org.get_member_count()
-    if active_member_count > 1:
+    # Only the owner may delete the organization.
+    caller_membership = _OrgMember.query.filter_by(
+        user_id=caller.id,
+        organization_id=org.id,
+        deleted_at=None,
+    ).first()
+
+    if not caller_membership or caller_membership.role != _OrgRole.OWNER:
         return api_response(
             success=False,
-            message=(
-                "This organization still has other members. "
-                "Please transfer ownership to another member or remove all "
-                "other members before deleting the organization."
-            ),
-            status=409,
-            error_type="ORG_HAS_MEMBERS",
-            error_details={"member_count": active_member_count},
+            message="Only the organization owner can delete the organization.",
+            status=403,
+            error_type="AUTHORIZATION_ERROR",
         )
 
-    OrganizationService.delete_organization(
+    # If other members exist, require explicit confirmation to avoid accidents.
+    active_member_count = org.get_member_count()
+    if active_member_count > 1:
+        data = request.get_json(silent=True) or {}
+        if not data.get("confirm"):
+            return api_response(
+                success=False,
+                message=(
+                    f"This organization has {active_member_count} active members. "
+                    "Deleting it will remove all members and their data. "
+                    'Send {"confirm": true} to confirm.'
+                ),
+                status=400,
+                error_type="CONFIRMATION_REQUIRED",
+                error_details={"member_count": active_member_count},
+            )
+
+    OrganizationService.force_delete_organization(
         org=org,
-        user_id=g.current_user.id,
-        soft=True,
+        user_id=caller.id,
     )
 
     return api_response(

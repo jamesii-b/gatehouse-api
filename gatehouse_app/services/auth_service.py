@@ -388,7 +388,7 @@ class AuthService:
 
         Args:
             user: User instance
-            password: User's current password for verification
+            password: User's current password for verification (ignored for OAuth-only users)
 
         Returns:
             True if TOTP disabled successfully
@@ -396,18 +396,21 @@ class AuthService:
         Raises:
             InvalidCredentialsError: If password is invalid or TOTP method not found
         """
-        # Verify user's password
+        # Verify user's password — only required when the user actually has one.
+        # OAuth-only users have no PASSWORD auth method; they authenticate via their
+        # identity provider so there is nothing to check here.
         auth_method = AuthenticationMethod.query.filter_by(
             user_id=user.id,
             method_type=AuthMethodType.PASSWORD,
             deleted_at=None,
         ).first()
 
-        if not auth_method or not auth_method.password_hash:
-            raise InvalidCredentialsError("No password authentication method found")
-
-        if not bcrypt.check_password_hash(auth_method.password_hash, password):
-            raise InvalidCredentialsError("Invalid password")
+        if auth_method and auth_method.password_hash:
+            # Password-based account: a password must be supplied and must match.
+            if not password:
+                raise InvalidCredentialsError("Password is required")
+            if not bcrypt.check_password_hash(auth_method.password_hash, password):
+                raise InvalidCredentialsError("Invalid password")
 
         # Get user's TOTP authentication method
         totp_method = user.get_totp_method()

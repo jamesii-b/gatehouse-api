@@ -9,6 +9,9 @@ class DevelopmentConfig(BaseConfig):
     # Use environment variable like BaseConfig does
     SQLALCHEMY_ECHO = os.getenv("SQLALCHEMY_ECHO", "False").lower() == "true"
     SESSION_COOKIE_SECURE = False
+    # SameSite=None requires Secure=True — browsers silently drop the cookie otherwise.
+    # In dev (http://localhost) use Lax so the TOTP/WebAuthn session cookie is actually sent.
+    SESSION_COOKIE_SAMESITE = "Lax"
 
     # More verbose logging in development
     LOG_LEVEL = "DEBUG"

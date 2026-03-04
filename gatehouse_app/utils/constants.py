@@ -90,6 +90,10 @@ class AuditAction(str, Enum):
     TOTP_DISABLED = "totp.disabled"
     TOTP_BACKUP_CODE_USED = "totp.backup_code.used"
     TOTP_BACKUP_CODES_REGENERATED = "totp.backup_codes.regenerated"
+    ADMIN_MFA_REMOVE = "admin.mfa.remove"
+    ADMIN_OAUTH_UNLINK = "admin.oauth.unlink"
+    ADMIN_PASSWORD_SET = "admin.password.set"
+    ADMIN_EMAIL_VERIFY = "admin.email.verify"
 
     # WebAuthn actions
     WEBAUTHN_REGISTER_INITIATED = "webauthn.register.initiated"

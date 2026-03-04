@@ -10,7 +10,7 @@ class AuditLog(BaseModel):
     __tablename__ = "audit_logs"
 
     user_id = db.Column(db.String(36), db.ForeignKey("users.id"), nullable=True, index=True)
-    action = db.Column(db.Enum(AuditAction), nullable=False, index=True)
+    action = db.Column(db.String(100), nullable=False, index=True)
 
     # Context
     resource_type = db.Column(db.String(50), nullable=True, index=True)

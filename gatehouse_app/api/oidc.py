@@ -12,7 +12,7 @@ from flask import Blueprint, request, redirect, jsonify, session, g, current_app
 logger = logging.getLogger(__name__)
 
 from gatehouse_app.utils.response import api_response
-from gatehouse_app.services.oidc_service import (
+from gatehouse_app.services.oidc import (
     OIDCService, InvalidClientError, InvalidGrantError, InvalidRequestError
 )
 from gatehouse_app.services.auth_service import AuthService
@@ -756,7 +756,8 @@ def _show_login_page(client_id, redirect_uri, scope, state, nonce, response_type
     if error:
         params["error"] = error
 
-    return redirect(f"{ui_base_url}/login?{urlencode(params)}")
+    # /oidc-login is the dedicated OIDC bridge UI (not the main /login page)
+    return redirect(f"{ui_base_url}/oidc-login?{urlencode(params)}")
 
 
 # ============================================================================

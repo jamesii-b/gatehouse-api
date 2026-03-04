@@ -1,5 +1,6 @@
 """Organization service."""
 import logging
+import uuid
 from datetime import datetime, timezone
 from flask import current_app
 from gatehouse_app.extensions import db
@@ -157,6 +158,12 @@ class OrganizationService:
         Returns:
             Deleted Organization instance
         """
+        if soft:
+            # Mangle slug so it can be reused
+            original_slug = org.slug
+            org.slug = f"{original_slug}__deleted_{uuid.uuid4().hex[:8]}"
+            org.is_active = False
+
         org.delete(soft=soft)
 
         # Log organization deletion
@@ -174,11 +181,16 @@ class OrganizationService:
     @staticmethod
     def force_delete_organization(org, user_id):
         """
-        Force-delete an organization and all its members in a single atomic operation.
+        Force-delete an organization and ALL associated data in a single atomic
+        operation.
 
-        All active memberships are soft-deleted before the organization itself
-        is soft-deleted, preventing orphaned membership rows and avoiding any
-        cascade deadlocks.
+        Cleans up:
+          - All active memberships (soft-deleted)
+          - MFA policy compliance records for this org
+          - User security policy overrides for this org
+          - Pending invite tokens for this org
+          - OIDC clients for this org
+          - The organization slug is mangled so the same slug can be reused
 
         Args:
             org: Organization instance
@@ -187,31 +199,71 @@ class OrganizationService:
         Returns:
             Deleted Organization instance
         """
-        from datetime import datetime, timezone
+        from gatehouse_app.models.security.mfa_policy_compliance import MfaPolicyCompliance
+        from gatehouse_app.models.security.user_security_policy import UserSecurityPolicy
+        from gatehouse_app.models.organization.org_invite_token import OrgInviteToken
 
         now = datetime.now(timezone.utc)
         member_count = 0
+        cleanup_counts = {}
 
-        # Soft-delete all active memberships first.
+        # 1. Soft-delete all active memberships first.
         for member in org.members:
             if member.deleted_at is None:
                 member.deleted_at = now
                 member_count += 1
 
-        # Now soft-delete the organization itself.
-        org.delete(soft=True)
+        # 2. Remove MFA compliance records for this org so the compliance job
+        #    doesn't accidentally process stale records for a deleted org.
+        compliance_records = MfaPolicyCompliance.query.filter_by(
+            organization_id=org.id,
+        ).filter(MfaPolicyCompliance.deleted_at == None).all()
+        for record in compliance_records:
+            record.deleted_at = now
+        cleanup_counts["compliance_records"] = len(compliance_records)
 
-        # Log with member count for audit trail.
+        # 3. Remove user security policy overrides for this org.
+        user_policies = UserSecurityPolicy.query.filter_by(
+            organization_id=org.id,
+        ).filter(UserSecurityPolicy.deleted_at == None).all()
+        for policy in user_policies:
+            policy.deleted_at = now
+        cleanup_counts["user_security_policies"] = len(user_policies)
+
+        # 4. Remove pending invite tokens for this org.
+        pending_invites = OrgInviteToken.query.filter_by(
+            organization_id=org.id,
+        ).filter(OrgInviteToken.accepted_at == None, OrgInviteToken.deleted_at == None).all()
+        for invite in pending_invites:
+            invite.deleted_at = now
+        cleanup_counts["pending_invites"] = len(pending_invites)
+
+        # 5. Mangle the slug so the same slug can be reused for a new org.
+        #    Format: "original-slug__deleted_<short-uuid>"
+        original_slug = org.slug
+        org.slug = f"{original_slug}__deleted_{uuid.uuid4().hex[:8]}"
+
+        # 6. Now soft-delete the organization itself.
+        org.deleted_at = now
+        org.is_active = False
+        db.session.commit()
+
+        # Log with member count and cleanup summary for audit trail.
         AuditService.log_action(
             action=AuditAction.ORG_DELETE,
             user_id=user_id,
             organization_id=org.id,
             resource_type="organization",
             resource_id=org.id,
-            metadata={"members_removed": member_count},
+            metadata={
+                "members_removed": member_count,
+                "original_slug": original_slug,
+                **cleanup_counts,
+            },
             description=(
-                f"Organization deleted by owner; "
-                f"{member_count} membership(s) removed."
+                f"Organization '{original_slug}' deleted by owner; "
+                f"{member_count} membership(s) removed, "
+                f"{cleanup_counts.get('compliance_records', 0)} compliance record(s) cleaned."
             ),
         )
 

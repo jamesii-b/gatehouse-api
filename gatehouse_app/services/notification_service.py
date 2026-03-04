@@ -295,6 +295,7 @@ Gatehouse Security Team
 
         Returns True if the email was sent successfully, False otherwise.
         If EMAIL_ENABLED is False, logs the email body instead (simulation mode).
+        All SMTP exceptions are caught and logged — this method never raises.
         """
         import smtplib
         from email.mime.multipart import MIMEMultipart
@@ -310,16 +311,36 @@ Gatehouse Security Team
             )
             return False
 
-        smtp_host = current_app.config.get(NotificationService.SMTP_HOST_KEY, "localhost")
-        smtp_port = int(current_app.config.get(NotificationService.SMTP_PORT_KEY, 587))
+        smtp_host = current_app.config.get(NotificationService.SMTP_HOST_KEY, "")
+        smtp_port_raw = current_app.config.get(NotificationService.SMTP_PORT_KEY, 587)
         smtp_username = current_app.config.get(NotificationService.SMTP_USERNAME_KEY)
         smtp_password = current_app.config.get(NotificationService.SMTP_PASSWORD_KEY)
+        from_address = current_app.config.get(
+            NotificationService.FROM_ADDRESS_KEY, ""
+        )
+
+        # Guard: refuse to attempt a connection when critical config is missing.
+        # This surfaces a clear log message instead of a confusing socket error.
+        missing = [k for k, v in [
+            ("SMTP_HOST", smtp_host),
+            ("FROM_ADDRESS", from_address),
+        ] if not v]
+        if missing:
+            logger.error(
+                f"[EMAIL] Cannot send — missing config: {', '.join(missing)}. "
+                f"Would have sent to: {to_address} | Subject: {subject}"
+            )
+            return False
+
+        try:
+            smtp_port = int(smtp_port_raw)
+        except (TypeError, ValueError):
+            logger.error(f"[EMAIL] Invalid SMTP_PORT value: {smtp_port_raw!r}")
+            return False
+
         smtp_use_tls = current_app.config.get(
             NotificationService.SMTP_USE_TLS_KEY,
             smtp_port not in (25, 1025),
-        )
-        from_address = current_app.config.get(
-            NotificationService.FROM_ADDRESS_KEY, "noreply@gatehouse.local"
         )
 
         try:

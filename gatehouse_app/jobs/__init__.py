@@ -1,1 +1,1 @@
-Jobs module for scheduled tasks.
+"""Jobs module for scheduled tasks."""

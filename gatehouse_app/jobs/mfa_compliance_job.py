@@ -20,9 +20,9 @@ from typing import Optional, Dict, Any, List
 import logging
 
 from gatehouse_app.extensions import db
-from gatehouse_app.models.mfa_policy_compliance import MfaPolicyCompliance
-from gatehouse_app.models.organization_security_policy import OrganizationSecurityPolicy
-from gatehouse_app.models.user import User
+from gatehouse_app.models.security.mfa_policy_compliance import MfaPolicyCompliance
+from gatehouse_app.models.security.organization_security_policy import OrganizationSecurityPolicy
+from gatehouse_app.models.user.user import User
 from gatehouse_app.services.mfa_policy_service import MfaPolicyService
 from gatehouse_app.services.notification_service import NotificationService
 from gatehouse_app.utils.constants import MfaComplianceStatus
@@ -201,6 +201,19 @@ def _evaluate_pending_compliance(now: datetime) -> int:
             # Get the user and evaluate their current state
             user = User.query.get(record.user_id)
             if not user:
+                continue
+
+            # Skip records for deleted organizations
+            from gatehouse_app.models.organization.organization import Organization
+            org = Organization.query.get(record.organization_id)
+            if not org or org.deleted_at is not None:
+                # Soft-delete orphaned compliance record
+                record.deleted_at = now or datetime.now(timezone.utc)
+                db.session.commit()
+                logger.info(
+                    f"Cleaned up orphaned compliance record {record.id} "
+                    f"for deleted org {record.organization_id}"
+                )
                 continue
 
             # Re-evaluate compliance status

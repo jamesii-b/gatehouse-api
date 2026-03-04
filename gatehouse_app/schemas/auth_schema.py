@@ -113,7 +113,8 @@ class TOTPVerifySchema(Schema):
 class TOTPDisableSchema(Schema):
     """Schema for disabling TOTP."""
 
-    password = fields.Str(required=True, validate=validate.Length(min=1))
+    # Password is optional: OAuth-only users have no password and skip verification.
+    password = fields.Str(load_default=None, allow_none=True)
 
 
 class TOTPRegenerateBackupCodesSchema(Schema):

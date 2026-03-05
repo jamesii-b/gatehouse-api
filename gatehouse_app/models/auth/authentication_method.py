@@ -213,7 +213,7 @@ class OrganizationProviderOverride(BaseModel):
 
     __table_args__ = (
         db.UniqueConstraint(
-            "organization_id", "provider_type", name="uix_org_provider_type"
+            "organization_id", "provider_type", name="uix_org_provider_override_type"
         ),
     )
 

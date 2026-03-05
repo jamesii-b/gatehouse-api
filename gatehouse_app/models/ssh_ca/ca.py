@@ -107,6 +107,7 @@ class CA(BaseModel):
     )
 
     __table_args__ = (
+        db.UniqueConstraint("organization_id", "name", name="uix_org_ca_name"),
         db.Index("idx_ca_org_active", "organization_id", "is_active"),
     )
 

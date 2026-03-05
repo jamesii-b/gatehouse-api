@@ -188,6 +188,8 @@ class OIDCJWKSService:
         Returns:
             Number of keys loaded
         """
+        if not self._table_exists():
+            return 0
         try:
             db_keys = OidcJwksKey.get_active_keys()
             now = datetime.now(timezone.utc)
@@ -208,6 +210,7 @@ class OIDCJWKSService:
             return len(self._keys)
         except Exception as e:
             current_app.logger.error(f"Error loading keys from database: {e}")
+            db.session.rollback()
             return 0
     
     def save_key_to_db(self, key: JWKSKey, is_primary: bool = False) -> OidcJwksKey:
@@ -364,6 +367,15 @@ class OIDCJWKSService:
         now = datetime.now(timezone.utc)
         return key.is_active and key.expires_at > now
     
+    def _table_exists(self) -> bool:
+        """Check if the oidc_jwks_keys table exists in the database."""
+        try:
+            from sqlalchemy import inspect
+            inspector = inspect(db.engine)
+            return "oidc_jwks_keys" in inspector.get_table_names()
+        except Exception:
+            return False
+
     def initialize_with_key(self) -> JWKSKey:
         """Initialize the service with a key, loading from database if available.
         
@@ -373,46 +385,55 @@ class OIDCJWKSService:
         Returns:
             JWKSKey instance
         """
-        # First, try to load keys from database
-        try:
-            # Check if there's a primary key in the database
-            primary_db_key = OidcJwksKey.get_primary_key()
-            if primary_db_key:
-                # Load the primary key into memory
-                now = datetime.now(timezone.utc)
-                key = JWKSKey(
-                    kid=primary_db_key.kid,
-                    private_key=primary_db_key.private_key,
-                    public_key=primary_db_key.public_key,
-                    algorithm=primary_db_key.algorithm,
-                    created_at=primary_db_key.created_at,
-                    expires_at=primary_db_key.expires_at or now + timedelta(days=365),
-                    is_active=primary_db_key.is_active,
-                )
-                self._keys[primary_db_key.kid] = key
-                current_app.logger.info(f"[OIDC] Loaded existing signing key from database: kid={primary_db_key.kid}")
-                return key
-            
-            # Try to load all active keys from database
-            loaded_count = self.load_keys_from_db()
-            if loaded_count > 0:
-                # Get the signing key from loaded keys
-                signing_key = self.get_signing_key()
-                if signing_key:
-                    current_app.logger.info(f"[OIDC] Loaded {loaded_count} keys from database, using signing key: kid={signing_key.kid}")
-                    return signing_key
-        except Exception as e:
-            current_app.logger.error(f"Error loading keys from database: {e}")
+        # Check if the table exists before attempting any DB operations
+        table_exists = self._table_exists()
+
+        if table_exists:
+            # First, try to load keys from database
+            try:
+                # Check if there's a primary key in the database
+                primary_db_key = OidcJwksKey.get_primary_key()
+                if primary_db_key:
+                    # Load the primary key into memory
+                    now = datetime.now(timezone.utc)
+                    key = JWKSKey(
+                        kid=primary_db_key.kid,
+                        private_key=primary_db_key.private_key,
+                        public_key=primary_db_key.public_key,
+                        algorithm=primary_db_key.algorithm,
+                        created_at=primary_db_key.created_at,
+                        expires_at=primary_db_key.expires_at or now + timedelta(days=365),
+                        is_active=primary_db_key.is_active,
+                    )
+                    self._keys[primary_db_key.kid] = key
+                    current_app.logger.info(f"[OIDC] Loaded existing signing key from database: kid={primary_db_key.kid}")
+                    return key
+                
+                # Try to load all active keys from database
+                loaded_count = self.load_keys_from_db()
+                if loaded_count > 0:
+                    # Get the signing key from loaded keys
+                    signing_key = self.get_signing_key()
+                    if signing_key:
+                        current_app.logger.info(f"[OIDC] Loaded {loaded_count} keys from database, using signing key: kid={signing_key.kid}")
+                        return signing_key
+            except Exception as e:
+                current_app.logger.error(f"Error loading keys from database: {e}")
+                db.session.rollback()
+        else:
+            current_app.logger.info("[OIDC] Table oidc_jwks_keys does not exist yet, skipping DB load")
         
         # No keys in database, generate a new key and save it
         current_app.logger.info("[OIDC] No existing keys found in database, generating new signing key")
         new_key = self.generate_new_key_pair()
         
-        # Save the new key to database
-        try:
-            self.save_key_to_db(new_key, is_primary=True)
-            current_app.logger.info(f"[OIDC] Saved new signing key to database: kid={new_key.kid}")
-        except Exception as e:
-            current_app.logger.error(f"Error saving key to database: {e}")
+        # Save the new key to database (only if table exists)
+        if table_exists:
+            try:
+                self.save_key_to_db(new_key, is_primary=True)
+                current_app.logger.info(f"[OIDC] Saved new signing key to database: kid={new_key.kid}")
+            except Exception as e:
+                current_app.logger.error(f"Error saving key to database: {e}")
+                db.session.rollback()
         
         return new_key

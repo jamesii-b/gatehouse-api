@@ -1,4 +1,11 @@
 """Initialize database script."""
+import sys
+import os
+import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
 from gatehouse_app import create_app
 from gatehouse_app.extensions import db
 from sqlalchemy import text

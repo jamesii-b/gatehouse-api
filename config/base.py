@@ -128,6 +128,8 @@ class BaseConfig:
 
     # Frontend URL (for OAuth callback redirects)
     FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:8080")
+    APP_URL = os.getenv("APP_URL", os.getenv("FRONTEND_URL", "http://localhost:8080"))
+    OIDC_UI_URL = os.getenv("OIDC_UI_URL", os.getenv("FRONTEND_URL", "http://localhost:8080"))
 
     # Email / SMTP
     EMAIL_ENABLED = os.getenv("EMAIL_ENABLED", "False").lower() == "true"

@@ -1,5 +1,6 @@
 """Management script for Flask application."""
 import os
+import click
 from dotenv import load_dotenv
 
 # Load environment variables FIRST, before any app imports
@@ -112,36 +113,75 @@ def mfa_compliance_status():
 
 
 @cli.command("configure_oauth")
-def configure_oauth():
-    """Interactively configure an OAuth provider at the application level.
+@click.argument("provider", required=False)
+@click.option("--client-id", default=None, help="OAuth client ID")
+@click.option("--client-secret", default=None, help="OAuth client secret")
+@click.option("--redirect-url", default=None, help="Default redirect URL (e.g. https://yourdomain.com/api/v1/auth/external/<provider>/callback)")
+def configure_oauth(provider, client_id, client_secret, redirect_url):
+    """Configure an OAuth provider at the application level.
 
-    Usage:
+    Usage (interactive):
         python manage.py configure_oauth
+
+    Usage (non-interactive):
+        python manage.py configure_oauth google --client-id ID --client-secret SECRET
 
     Supported providers: google, github, microsoft
     """
     import getpass
-    from gatehouse_app.models.authentication_method import ApplicationProviderConfig
+    from gatehouse_app.models.auth.authentication_method import ApplicationProviderConfig
     from gatehouse_app.extensions import db
 
     SUPPORTED = ["google", "github", "microsoft"]
 
-    print("=" * 60)
-    print("OAuth Provider Configuration")
-    print("=" * 60)
-    print(f"Supported providers: {', '.join(SUPPORTED)}")
+    # Well-known endpoints — stored in additional_config so the adapter can
+    # resolve auth_url / token_url / userinfo_url without extra logic.
+    PROVIDER_DEFAULTS = {
+        "google": {
+            "auth_url": "https://accounts.google.com/o/oauth2/v2/auth",
+            "token_url": "https://oauth2.googleapis.com/token",
+            "userinfo_url": "https://www.googleapis.com/oauth2/v3/userinfo",
+        },
+        "github": {
+            "auth_url": "https://github.com/login/oauth/authorize",
+            "token_url": "https://github.com/login/oauth/access_token",
+            "userinfo_url": "https://api.github.com/user",
+        },
+        "microsoft": {
+            "auth_url": "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
+            "token_url": "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+            "userinfo_url": "https://graph.microsoft.com/oidc/userinfo",
+        },
+    }
 
-    provider = input("Provider [google/github/microsoft]: ").strip().lower()
+    if not provider:
+        print("=" * 60)
+        print("OAuth Provider Configuration")
+        print("=" * 60)
+        print(f"Supported providers: {', '.join(SUPPORTED)}")
+        provider = input("Provider [google/github/microsoft]: ").strip().lower()
+
+    provider = provider.strip().lower()
     if provider not in SUPPORTED:
         print(f"❌ Unknown provider: {provider}")
         return
 
-    client_id = input("Client ID: ").strip()
+    if not client_id:
+        client_id = input("Client ID: ").strip()
     if not client_id:
         print("❌ client_id is required")
         return
 
-    client_secret = getpass.getpass("Client Secret (leave blank to keep existing): ").strip()
+    if not client_secret:
+        client_secret = getpass.getpass("Client Secret (leave blank to keep existing): ").strip()
+
+    if not redirect_url:
+        base_url = os.getenv("API_BASE_URL", "http://localhost:5000/api/v1")
+        default = f"{base_url}/auth/external/{provider}/callback"
+        entered = input(f"Default redirect URL [{default}]: ").strip()
+        redirect_url = entered or default
+
+    additional_config = PROVIDER_DEFAULTS[provider].copy()
 
     with app.app_context():
         config = ApplicationProviderConfig.query.filter_by(provider_type=provider).first()
@@ -150,6 +190,11 @@ def configure_oauth():
             if client_secret:
                 config.set_client_secret(client_secret)
             config.is_enabled = True
+            config.default_redirect_url = redirect_url
+            config.additional_config = {
+                **(config.additional_config or {}),
+                **additional_config,
+            }
             db.session.commit()
             print(f"✅ Updated {provider} provider config.")
         else:
@@ -157,12 +202,16 @@ def configure_oauth():
                 provider_type=provider,
                 client_id=client_id,
                 is_enabled=True,
+                default_redirect_url=redirect_url,
+                additional_config=additional_config,
             )
             if client_secret:
                 config.set_client_secret(client_secret)
             db.session.add(config)
             db.session.commit()
             print(f"✅ Created {provider} provider config.")
+        print(f"   redirect_url : {redirect_url}")
+        print(f"   auth_url     : {additional_config['auth_url']}")
 
 
 @cli.command("list_oauth")
@@ -172,7 +221,7 @@ def list_oauth():
     Usage:
         python manage.py list_oauth
     """
-    from gatehouse_app.models.authentication_method import ApplicationProviderConfig
+    from gatehouse_app.models.auth.authentication_method import ApplicationProviderConfig
 
     with app.app_context():
         configs = ApplicationProviderConfig.query.all()

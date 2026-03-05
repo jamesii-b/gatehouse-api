@@ -58,7 +58,7 @@ if os.path.exists(env_file):
 
 # Import after path setup
 from gatehouse_app import create_app
-from gatehouse_app.services.external_auth_service import ExternalAuthService, ExternalAuthError
+from gatehouse_app.services.external_auth import ExternalAuthService, ExternalAuthError
 
 
 def _microsoft_defaults() -> dict:

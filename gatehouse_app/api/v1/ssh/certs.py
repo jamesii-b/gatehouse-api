@@ -130,14 +130,18 @@ def sign_certificate():
 
     dept_policy = _get_merged_dept_cert_policy(user_id)
     if dept_policy:
-        if is_org_admin:
+        if not dept_policy["allow_user_expiry"]:
+            expiry_hours = dept_policy["default_expiry_hours"]
+        elif is_org_admin:
             if expiry_hours is not None:
                 expiry_hours = min(int(expiry_hours), dept_policy["max_expiry_hours"])
-        elif not dept_policy["allow_user_expiry"]:
-            expiry_hours = dept_policy["default_expiry_hours"]
+            else:
+                expiry_hours = dept_policy["default_expiry_hours"]
         else:
             if expiry_hours is not None:
                 expiry_hours = min(int(expiry_hours), dept_policy["max_expiry_hours"])
+            else:
+                expiry_hours = dept_policy["default_expiry_hours"]
         policy_extensions = dept_policy["extensions"]
     else:
         policy_extensions = None

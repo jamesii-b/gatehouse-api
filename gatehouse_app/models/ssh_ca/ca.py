@@ -1,8 +1,13 @@
 """Certificate Authority (CA) model."""
+import time
 from enum import Enum
 from datetime import datetime, timezone
 from gatehouse_app.extensions import db
 from gatehouse_app.models.base import BaseModel
+
+
+def _serial_start() -> int:
+    return int(time.time() * 1000)
 
 
 class KeyType(str, Enum):
@@ -91,7 +96,9 @@ class CA(BaseModel):
     # Monotonically-increasing serial counter.  Every cert this CA issues
     # gets the next value so serials are unique, ordered, and auditable.
     # Protected by a row-level SELECT … FOR UPDATE in get_next_serial().
-    next_serial_number = db.Column(db.BigInteger, default=1, nullable=False)
+    # Initialised to the current Unix timestamp in milliseconds so serials
+    # are globally unique across CAs from the moment of creation.
+    next_serial_number = db.Column(db.BigInteger, default=_serial_start, nullable=False)
 
     # Relationships
     organization = db.relationship("Organization", back_populates="cas")

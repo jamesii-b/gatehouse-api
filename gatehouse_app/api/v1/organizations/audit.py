@@ -173,3 +173,101 @@ def get_my_audit_logs():
         },
         message="Activity retrieved",
     )
+
+
+@api_v1_bp.route("/organizations/<org_id>/certificates/audit", methods=["GET"])
+@login_required
+@require_admin
+@full_access_required
+def get_certificate_audit_logs(org_id):
+    """
+    Get certificate issuance audit logs for an organization.
+    
+    Only accessible by organization admins.
+    Returns certificate serial IDs, user IDs, and issuance timestamps for compliance.
+    
+    Args:
+        org_id: Organization ID
+    
+    Returns:
+        200: List of certificate audit logs
+        401: Not authenticated
+        403: Not an admin
+        404: Organization not found
+    """
+    from gatehouse_app.models.ssh_ca.certificate_audit_log import CertificateAuditLog
+    from gatehouse_app.models.ssh_ca.ssh_certificate import SSHCertificate
+    from gatehouse_app.models.user import User
+    
+    org = OrganizationService.get_organization_by_id(org_id)
+    
+    page = max(1, int(request.args.get("page", 1)))
+    per_page = min(int(request.args.get("per_page", 50)), 200)
+    action_filter = request.args.get("action", "signed")  # Default to signed certificates
+    
+    # Get all CAs for this organization
+    from gatehouse_app.models.ssh_ca import CA
+    org_cas = CA.query.filter_by(organization_id=org_id, deleted_at=None).all()
+    org_ca_ids = [ca.id for ca in org_cas]
+    
+    if not org_ca_ids:
+        return api_response(
+            data={
+                "audit_logs": [],
+                "count": 0,
+                "page": page,
+                "per_page": per_page,
+                "pages": 0,
+            },
+            message="No certificate audit logs found",
+        )
+    
+    # Query certificate audit logs for certificates issued by org's CAs
+    query = CertificateAuditLog.query.join(
+        SSHCertificate,
+        CertificateAuditLog.certificate_id == SSHCertificate.id
+    ).filter(
+        SSHCertificate.ca_id.in_(org_ca_ids),
+        CertificateAuditLog.deleted_at.is_(None)
+    )
+    
+    if action_filter:
+        query = query.filter(CertificateAuditLog.action == action_filter)
+    
+    query = query.order_by(CertificateAuditLog.created_at.desc())
+    total = query.count()
+    logs = query.offset((page - 1) * per_page).limit(per_page).all()
+    
+    # Build response data with certificate details
+    audit_data = []
+    for log in logs:
+        cert = log.certificate
+        user = log.user
+        audit_data.append({
+            "id": log.id,
+            "action": log.action,
+            "certificate_serial": cert.serial,
+            "key_id": cert.key_id,
+            "principals": cert.principals,
+            "user_id": user.id if user else cert.user_id,
+            "user_email": user.email if user else None,
+            "issued_at": cert.created_at.isoformat() if cert.created_at else None,
+            "valid_after": cert.valid_after.isoformat() if cert.valid_after else None,
+            "valid_before": cert.valid_before.isoformat() if cert.valid_before else None,
+            "ip_address": log.ip_address,
+            "user_agent": log.user_agent,
+            "message": log.message,
+            "success": log.success,
+            "created_at": log.created_at.isoformat() if log.created_at else None,
+        })
+    
+    return api_response(
+        data={
+            "audit_logs": audit_data,
+            "count": total,
+            "page": page,
+            "per_page": per_page,
+            "pages": (total + per_page - 1) // per_page,
+        },
+        message="Certificate audit logs retrieved successfully",
+    )

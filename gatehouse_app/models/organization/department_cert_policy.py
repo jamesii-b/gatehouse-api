@@ -4,12 +4,13 @@ from gatehouse_app.extensions import db
 from gatehouse_app.models.base import BaseModel
 
 
-# Standard SSH certificate extensions
+# Standard SSH certificate extensions — must be in strict lexical order
+# (OpenSSH RFC 4251 §5 / golang.org/x/crypto/ssh requires lexical ordering)
 STANDARD_EXTENSIONS = [
     "permit-X11-forwarding",
     "permit-agent-forwarding",
-    "permit-pty",
     "permit-port-forwarding",
+    "permit-pty",
     "permit-user-rc",
 ]
 

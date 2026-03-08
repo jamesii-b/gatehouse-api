@@ -288,6 +288,12 @@ class SSHCASigningService:
                 else:
                     extensions = []  # host certs: no extensions
 
+            # OpenSSH (RFC 4251 §5) and golang.org/x/crypto/ssh require
+            # certificate extensions to be in strict lexical (alphabetical) order.
+            # Sort unconditionally so any caller-supplied or policy-derived list
+            # is guaranteed to be compliant.
+            extensions = sorted(extensions)
+
             certificate.fields.extensions = extensions
             certificate.fields.critical_options = signing_request.critical_options or {}
             

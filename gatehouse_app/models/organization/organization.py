@@ -43,6 +43,9 @@ class Organization(BaseModel):
     cas = db.relationship(
         "CA", back_populates="organization", cascade="all, delete-orphan"
     )
+    api_keys = db.relationship(
+        "OrganizationApiKey", back_populates="organization", cascade="all, delete-orphan"
+    )
 
     def __repr__(self):
         """String representation of Organization."""

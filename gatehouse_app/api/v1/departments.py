@@ -16,12 +16,15 @@ class DepartmentCreateSchema(Schema):
     """Schema for creating a department."""
     name = fields.Str(required=True, validate=validate.Length(min=1, max=255))
     description = fields.Str(allow_none=True, validate=validate.Length(max=2000))
+    can_sudo = fields.Bool(allow_none=True, load_default=False)
+
 
 
 class DepartmentUpdateSchema(Schema):
     """Schema for updating a department."""
     name = fields.Str(validate=validate.Length(min=1, max=255))
     description = fields.Str(allow_none=True, validate=validate.Length(max=2000))
+    can_sudo = fields.Bool(allow_none=True)
 
 
 class AddDepartmentMemberSchema(Schema):
@@ -119,6 +122,7 @@ def create_department(org_id):
             organization_id=org_id,
             name=data["name"],
             description=data.get("description"),
+            can_sudo=data.get("can_sudo", False),
         )
         db.session.add(dept)
         db.session.commit()

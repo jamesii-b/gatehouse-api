@@ -27,6 +27,7 @@ class Department(BaseModel):
     )
     name = db.Column(db.String(255), nullable=False, index=True)
     description = db.Column(db.Text, nullable=True)
+    can_sudo = db.Column(db.Boolean, default=False, nullable=False)
 
     # Relationships
     organization = db.relationship("Organization", back_populates="departments")

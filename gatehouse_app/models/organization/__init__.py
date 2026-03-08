@@ -12,6 +12,7 @@ from gatehouse_app.models.organization.department_cert_policy import (
 )
 from gatehouse_app.models.organization.principal import Principal, PrincipalMembership
 from gatehouse_app.models.organization.org_invite_token import OrgInviteToken
+from gatehouse_app.models.organization.organization_api_key import OrganizationApiKey
 
 __all__ = [
     "Organization",
@@ -24,4 +25,5 @@ __all__ = [
     "Principal",
     "PrincipalMembership",
     "OrgInviteToken",
+    "OrganizationApiKey",
 ]

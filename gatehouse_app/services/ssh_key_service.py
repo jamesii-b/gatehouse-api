@@ -206,6 +206,40 @@ class SSHKeyService:
         
         return challenge_text
 
+    @staticmethod
+    def _decode_signature(signature: str) -> bytes:
+        """Decode a user-supplied signature into raw SSH signature bytes.
+
+        Accepts either:
+          1. The raw SSH armored signature (-----BEGIN SSH SIGNATURE-----)
+          2. A base64-encoded version of that armored signature
+             (produced by ``cat file.sig | base64 -w0``)
+
+        Returns the raw armored signature bytes suitable for writing to a
+        ``.sig`` file that ``ssh-keygen -Y verify`` can read.
+        """
+        stripped = signature.strip()
+
+        # If it already looks like a raw SSH signature armor, use it directly
+        if stripped.startswith("-----BEGIN SSH SIGNATURE-----"):
+            return stripped.encode("utf-8")
+
+        # Otherwise treat it as base64 — strip any embedded whitespace first
+        cleaned = stripped.replace("\n", "").replace("\r", "").replace(" ", "")
+        try:
+            decoded = base64.b64decode(cleaned)
+        except Exception as exc:
+            raise SSHKeyError(f"Could not decode signature: {exc}")
+
+        # Sanity-check: the decoded bytes should be a valid SSH signature
+        text = decoded.decode("utf-8", errors="replace")
+        if "-----BEGIN SSH SIGNATURE-----" not in text:
+            raise SSHKeyError(
+                "Invalid signature format. Please paste the output of: "
+                "cat /tmp/challenge.txt.sig | base64 -w0"
+            )
+        return decoded
+
     def verify_ssh_key_ownership(
         self,
         key_id: str,
@@ -247,7 +281,7 @@ class SSHKeyService:
             # allowed_signers format: "<identity> <keytype> <pubkey>"
             # We use the key fingerprint as the identity.
 
-            sig_bytes = base64.b64decode(signature)
+            sig_bytes = self._decode_signature(signature)
             challenge_text = key.verify_text + "\n"
 
             with tempfile.TemporaryDirectory() as tmpdir:
